@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # Automation Container (Student's submission)
+  automation:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: automation_container
+    
+    # Port mapping for manual testing
+    ports:
+      - "5900:5900"  # VNC
+      - "6080:6080"  # Web VNC
+      - "${API_PORT:-5001}:5000"  # API (configurable host port, default 5001)
+    
+    # Volume mounts
+    volumes:
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+    
+    # Environment variables
+    environment:
+      - DISPLAY=:99
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1080
+      - SCREEN_DEPTH=24
+      - BROWSER=chrome
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    
+    # Keep container running
+    stdin_open: true
+    tty: true
+    
+    # Network for communication
+    networks:
+      - evaluation_network
+  
+  # Evaluation Container
+  evaluator:
+    build:
+      context: ./evaluator
+      dockerfile: Dockerfile
+    container_name: evaluation_container
+    
+    # Depends on automation container
+    depends_on:
+      - automation
+    
+    # No volume mounts needed - output goes to console
+    
+    # Environment variables
+    environment:
+      - AUTOMATION_API_URL=http://automation:5000
+      - PYTHONUNBUFFERED=1
+    
+    # Network for communication
+    networks:
+      - evaluation_network
+    
+    # Wait for automation container to be ready
+    restart: "no"
+
+networks:
+  evaluation_network:
+    driver: bridge 

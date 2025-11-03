@@ -1,0 +1,87 @@
+{
+  "cached_at": "2025-11-03T07:18:42.627810",
+  "milestones": {
+    "Reached hub site": {
+      "cached_at": "2025-11-03T07:18:42.627890",
+      "script": "page.goto('http://seacargotracking.net')\npage.wait_for_load_state('load')",
+      "operations": [
+        "step_start",
+        "cache_check",
+        "reasoning_query",
+        "reasoning_response",
+        "screenshot_multifold",
+        "language_query",
+        "language_response",
+        "script_generation_request",
+        "script_generation_response",
+        "script_compilation",
+        "script_execution_start",
+        "script_execution_result",
+        "url_updated_after_script",
+        "screenshot_post_execution",
+        "window_screenshot_post_execution",
+        "tab_analysis_post_execution",
+        "vision_query_post_execution",
+        "vision_response_post_execution",
+        "milestone_completed"
+      ]
+    },
+    "Reached HMM website": {
+      "cached_at": "2025-11-03T07:19:36.049452",
+      "script": "link = page.locator(\"text='HYUNDAI Merchant Marine (HMM)'\").first\nlink.scroll_into_view_if_needed()\nold_page = page\nwith page.context.expect_page() as new_page_info:\n    link.click()\nnew_page = new_page_info.value\nif new_page:\n    page = new_page\n    old_page.close()",
+      "operations": [
+        "step_start",
+        "cache_check",
+        "reasoning_query",
+        "reasoning_response",
+        "screenshot_multifold",
+        "language_query",
+        "language_response",
+        "vision_query",
+        "vision_response",
+        "vision_query",
+        "vision_response",
+        "language_query_with_vision",
+        "language_response_with_vision",
+        "script_generation_request",
+        "script_generation_response",
+        "script_compilation",
+        "script_execution_start",
+        "script_execution_result",
+        "tab_switched",
+        "url_updated_after_script",
+        "screenshot_post_execution",
+        "window_screenshot_post_execution",
+        "tab_analysis_post_execution",
+        "vision_query_post_execution",
+        "vision_response_post_execution",
+        "milestone_completed"
+      ]
+    },
+    "Accessed services section (if needed)": {
+      "cached_at": "2025-11-03T07:20:15.164286",
+      "script": "vision_helpers.click_at_coordinates(1170, 70)\npage.wait_for_load_state('load')",
+      "operations": [
+        "step_start",
+        "cache_check",
+        "reasoning_query",
+        "reasoning_response",
+        "screenshot_multifold",
+        "language_query",
+        "language_response",
+        "script_generation_request",
+        "script_generation_response",
+        "script_compilation",
+        "script_execution_start",
+        "script_execution_result",
+        "url_updated_after_script",
+        "screenshot_post_execution",
+        "window_screenshot_post_execution",
+        "tab_analysis_post_execution",
+        "vision_query_post_execution",
+        "vision_response_post_execution",
+        "milestone_completed"
+      ]
+    }
+  }
+}

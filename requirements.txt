@@ -1,0 +1,8 @@
+playwright==1.48.0
+playwright-stealth==1.0.6
+Pillow==10.0.1
+selenium==4.16.0
+webdriver-manager==4.0.1
+Flask==3.0.0
+openai>=1.54.0 
+pyautogui==0.9.54
