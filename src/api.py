@@ -46,7 +46,7 @@ class MilestoneCache:
     def __init__(self, cache_dir="cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_ttl_days = 14  # Only use cache newer than 14 days
+        self.cache_ttl_days = 14
     
     def _get_cache_path(self, carrier, booking_id):
         """Get cache file path for a specific carrier:booking_id combination."""
@@ -64,7 +64,6 @@ class MilestoneCache:
             with open(cache_path, 'r') as f:
                 cache_data = json.load(f)
             
-            # Check if cache is fresh (< 14 days old)
             cached_at = datetime.fromisoformat(cache_data.get("cached_at", "2000-01-01"))
             age = datetime.now() - cached_at
             
@@ -93,7 +92,6 @@ class MilestoneCache:
         """Save a successful milestone script to cache."""
         cache_path = self._get_cache_path(carrier, booking_id)
         
-        # Load existing cache or create new
         if cache_path.exists():
             try:
                 with open(cache_path, 'r') as f:
@@ -103,7 +101,6 @@ class MilestoneCache:
         else:
             cache_data = {"cached_at": datetime.now().isoformat(), "milestones": {}}
         
-        # Update only this specific milestone (partial update)
         if "milestones" not in cache_data:
             cache_data["milestones"] = {}
         
@@ -113,7 +110,6 @@ class MilestoneCache:
             "operations": operations or []
         }
         
-        # Save to file
         try:
             with open(cache_path, 'w') as f:
                 json.dump(cache_data, f, indent=2)
@@ -125,7 +121,6 @@ class MilestoneCache:
         """Save final results (voyage number and arrival date) to cache."""
         cache_path = self._get_cache_path(carrier, booking_id)
         
-        # Load existing cache or create new
         if cache_path.exists():
             try:
                 with open(cache_path, 'r') as f:
@@ -135,7 +130,6 @@ class MilestoneCache:
         else:
             cache_data = {"cached_at": datetime.now().isoformat(), "milestones": {}}
         
-        # Add final results
         cache_data["final_results"] = {
             "voyage_number": voyage_number,
             "arrival_date": arrival_date,
@@ -143,7 +137,6 @@ class MilestoneCache:
             "cached_at": datetime.now().isoformat()
         }
         
-        # Save to file
         try:
             with open(cache_path, 'w') as f:
                 json.dump(cache_data, f, indent=2)
@@ -160,7 +153,6 @@ class MilestoneCache:
         
         return cache.get("final_results")
 
-# Global cache instance
 milestone_cache = MilestoneCache()
 
 # ============================================================================
@@ -330,7 +322,6 @@ class CurrentContext:
         self.goal = f"Extract voyage number and arrival date for booking {booking_id}"
         self.booking_id = booking_id
         self.carrier = carrier.lower()
-        # Initialize remaining milestones from the workflow and substitute carrier name
         self.remaining_milestones = [
             milestone.format(carrier=self.carrier.upper())
             for milestone in DOMAIN_KNOWLEDGE["shipping_tracking_workflow"]["milestones"]
@@ -356,10 +347,8 @@ class CurrentContext:
     
     def update_milestone(self, milestone):
         self.last_achieved_milestone = milestone
-        # Remove completed milestone from remaining list (use fuzzy matching)
         if milestone and self.remaining_milestones:
             milestone_lower = milestone.lower()
-            # Try to find and remove matching milestone
             for i, remaining in enumerate(self.remaining_milestones):
                 if remaining.lower() in milestone_lower or milestone_lower in remaining.lower():
                     self.remaining_milestones.pop(i)
@@ -376,10 +365,8 @@ class CurrentContext:
             self.history.pop(0)
     
     def to_dict(self):
-        # Get most recent step's data from history if available
         recent_step_data = {}
         if self.history:
-            # History is ordered, get the most recent (last entry)
             most_recent = self.history[-1]
             recent_step_data = {
                 "last_step_milestone": most_recent.get("milestone"),
@@ -388,7 +375,6 @@ class CurrentContext:
                 "last_step_errors": most_recent.get("errors", [])
             }
         
-        # Get next milestone (first in remaining list)
         next_milestone = self.remaining_milestones[0] if self.remaining_milestones else "Goal completion"
         
         return {
@@ -441,7 +427,6 @@ class VisionHelpers:
         except:
             pass
         
-        # Strategy 1: Try pressing Escape key
         try:
             self.page.keyboard.press("Escape")
             self.page.wait_for_timeout(500)
@@ -449,7 +434,6 @@ class VisionHelpers:
         except Exception:
             pass
         
-        # Strategy 2: Use JavaScript to find popup-like elements by metadata/characteristics
         try:
             popup_info = self.page.evaluate("""
                 () => {
@@ -547,11 +531,9 @@ class VisionHelpers:
             if popup_info.get("found") and len(popup_info.get("popups", [])) > 0:
                 print(f"  🔍 Found {len(popup_info['popups'])} popup-like element(s) using metadata detection")
                 
-                # Try the highest z-index popup first (most likely the visible one)
                 for popup_idx, popup in enumerate(popup_info["popups"]):
                     print(f"  📋 Popup {popup_idx + 1} (z-index {popup['zIndex']}) has {len(popup['closeButtons'])} close button candidate(s)")
                     
-                    # Store the popup's z-index to check if it disappeared
                     target_z_index = popup["zIndex"]
                     
                     for btn_idx, close_btn in enumerate(popup["closeButtons"]):
@@ -561,10 +543,8 @@ class VisionHelpers:
                             print(f"  🖱️  Attempting to click button {btn_idx + 1} at ({x}, {y}) - text: '{btn_text}'")
                             
                             self.page.mouse.click(x, y)
-                            # Wait longer for popup closing animation to complete (was 800ms, now 2000ms)
                             self.page.wait_for_timeout(2000)
                             
-                            # Check if popup with this z-index disappeared
                             remaining_popups_info = self.page.evaluate("""
                                 () => {
                                     const allElements = document.querySelectorAll('*');
@@ -585,7 +565,6 @@ class VisionHelpers:
                                 }
                             """)
                             
-                            # Check if the target popup disappeared
                             if target_z_index not in remaining_popups_info:
                                 print(f"  ✅ Successfully closed popup (z-index {target_z_index} disappeared)!")
                                 return True
@@ -596,7 +575,6 @@ class VisionHelpers:
                             print(f"  ⚠️  Error clicking button: {e}")
                             continue
                     
-                    # If highest z-index popup couldn't be closed, try others
                     if popup_idx == 0:
                         print(f"  ⚠️  Could not close highest z-index popup, trying others...")
                         continue
@@ -605,7 +583,6 @@ class VisionHelpers:
         except Exception as e:
             print(f"  ⚠️  Error in popup detection: {e}")
         
-        # Strategy 3: Fallback - position-based detection
         print("  🔍 Trying position-based close button detection...")
         try:
             viewport = self.page.viewport_size or {"width": 1280, "height": 720}
@@ -662,7 +639,6 @@ class VisionHelpers:
             raise
     
     def take_multifold_screenshots(self, prefix, screenshot_dir, timeout=30000):
-        # Check if page is still valid
         if self.page.is_closed():
             raise Exception("Page is closed, cannot take screenshot")
         
@@ -678,7 +654,6 @@ class VisionHelpers:
             )
         except Exception as e:
             print(f"⚠️  Could not evaluate page height: {e}")
-            # Fallback to single screenshot
             screenshot_path = self.take_screenshot(Path(screenshot_dir) / f"{prefix}_fold_01.png", timeout)
             return [{"path": str(screenshot_path), "scroll_top": 0}]
         
@@ -696,21 +671,18 @@ class VisionHelpers:
                 screenshots.append({"path": str(path), "scroll_top": scroll_top})
             except Exception as e:
                 print(f"⚠️  Failed to take screenshot fold {idx+1}: {e}")
-                # Continue with screenshots taken so far
                 if not screenshots:
-                    # If first screenshot failed, raise to trigger fallback
                     raise
         
         try:
             self.page.evaluate("window.scrollTo(0, 0)")
             self.page.wait_for_timeout(250)
         except:
-            pass  # Ignore errors on scroll back
+            pass
         
         if screenshots:
             return screenshots
         else:
-            # Fallback if all screenshots failed
             screenshot_path = self.take_screenshot(Path(screenshot_dir) / f"{prefix}_fold_01.png", timeout)
             return [{"path": str(screenshot_path), "scroll_top": 0}]
     
@@ -792,25 +764,20 @@ class VisionHelpers:
             dict with {"success": bool, "new_page": Page or None, "switched": bool}
         """
         try:
-            # Lazy import to avoid X11 connection issues at startup
             import pyautogui
             
-            # Scroll to bring coordinates into view if needed
             if scroll_into_view:
                 viewport = self.page.viewport_size or {"width": 1280, "height": 720}
                 current_scroll = self.page.evaluate("window.pageYOffset")
                 
-                # If y coordinate is outside viewport, scroll to it
                 if y < current_scroll or y > current_scroll + viewport["height"]:
                     scroll_to_y = max(0, y - viewport["height"] // 2)
                     self.page.evaluate(f"window.scrollTo(0, {scroll_to_y})")
-                    self.page.wait_for_timeout(500)  # Wait for scroll animation
+                    self.page.wait_for_timeout(500)
                     
-                    # Adjust y coordinate after scrolling
                     new_scroll = self.page.evaluate("window.pageYOffset")
                     y = y - new_scroll
             
-            # Convert viewport coordinates to screen coordinates
             screen_coords = self.viewport_to_screen(x, y)
             
             print(f"🖱️  Clicking at viewport ({x}, {y}) → screen ({screen_coords['screen_x']:.0f}, {screen_coords['screen_y']:.0f})")
@@ -821,7 +788,6 @@ class VisionHelpers:
             try:
                 print(f"🔍 Attempting coordinate click with new tab detection...")
                 with self.page.context.expect_page(timeout=3000) as new_page_info:
-                    # Perform the coordinate click
                     pyautogui.click(screen_coords["screen_x"], screen_coords["screen_y"])
                 
                 new_page = new_page_info.value
@@ -839,19 +805,15 @@ class VisionHelpers:
                     
                     print(f"🔄 Switched from {old_url} → {new_page.url}")
                     
-                    # Close any popups on the new tab
                     popup_closed = False
                     try:
                         popup_closed = self.close_popup()
-                        # Track that we closed popups so execute() doesn't close them again
                         self.popup_closed_by_click = popup_closed
                     except Exception as popup_error:
                         print(f"⚠️  Popup closing failed: {popup_error}")
                     
                     return {"success": True, "new_page": new_page, "switched": True, "popup_closed": popup_closed}
             except Exception as expect_error:
-                # TimeoutError or other exception - no new tab opened
-                # This is expected if link navigates in same tab
                 print(f"ℹ️  No new tab detected (timeout or same-tab navigation): {type(expect_error).__name__}")
             
             # ============================================================
@@ -860,11 +822,10 @@ class VisionHelpers:
             print(f"🖱️  Performing normal coordinate click (same-tab navigation)...")
             pyautogui.click(screen_coords["screen_x"], screen_coords["screen_y"])
             
-            # Wait for page to load (navigation might happen in same tab)
             try:
                 self.page.wait_for_load_state('domcontentloaded', timeout=5000)
             except:
-                pass  # Page might already be loaded or navigation failed
+                pass
             
             return {"success": True, "new_page": None, "switched": False, "popup_closed": False}
             
@@ -887,35 +848,27 @@ class VisionHelpers:
             dict with {"success": bool, "new_page": Page or None, "switched": bool}
         """
         try:
-            # Scroll to bring coordinates into view if needed
-            # Vision coordinates are viewport-relative (0,0 = top-left of visible area)
             if scroll_into_view:
                 viewport = self.page.viewport_size or {"width": 1280, "height": 720}
                 viewport_height = viewport["height"]
                 
-                # If y coordinate is near the bottom or outside viewport, scroll to center it
-                # We scroll the page so that the target y is in the middle of the viewport
                 current_scroll = self.page.evaluate("window.pageYOffset")
                 absolute_y = current_scroll + y
                 target_scroll = max(0, absolute_y - viewport_height // 2)
                 
-                if abs(current_scroll - target_scroll) > 10:  # Only scroll if significant difference
+                if abs(current_scroll - target_scroll) > 10:
                     self.page.evaluate(f"window.scrollTo(0, {target_scroll})")
-                    self.page.wait_for_timeout(500)  # Wait for scroll animation
+                    self.page.wait_for_timeout(500)
                     
-                    # Recalculate y in new viewport (should be approximately viewport_height/2)
                     new_scroll = self.page.evaluate("window.pageYOffset")
                     y = absolute_y - new_scroll
             
-            # Check if clicking might open a new tab (for carrier links, e-Service links, etc.)
             new_page = None
             switched = False
             
-            # Use Playwright's native mouse click (viewport coordinates)
             print(f"🖱️  Clicking at viewport coordinates ({x}, {y}) using Playwright mouse")
             
             try:
-                # Try to detect if click opens new tab
                 with self.page.context.expect_page(timeout=3000) as new_page_info:
                     self.page.mouse.click(x, y)
                 
@@ -934,7 +887,6 @@ class VisionHelpers:
                     
                     print(f"🔄 Switched from {old_url} → {new_page.url}")
                     
-                    # Close any popups on the new tab
                     popup_closed = False
                     try:
                         popup_closed = self.close_popup()
@@ -947,40 +899,28 @@ class VisionHelpers:
                     page_to_use = self.page
                     
             except Exception as expect_error:
-                # TimeoutError or other exception - no new tab opened (expected for same-tab navigation)
-                # The click already happened inside the expect_page() context, so we just continue
                 print(f"ℹ️  No new tab detected (same-tab navigation): {type(expect_error).__name__}")
                 page_to_use = self.page
             
-            # Wait a brief moment for the input field to be ready and focused
             page_to_use.wait_for_timeout(300)
             
-            # Clear any existing text in the input field first to prevent duplication
-            # The field should already be focused from the click above
             try:
-                # Select all text using keyboard shortcut (works on Windows/Linux)
                 page_to_use.keyboard.press('Control+a')
                 page_to_use.wait_for_timeout(50)
-                # Delete the selected text
                 page_to_use.keyboard.press('Delete')
                 page_to_use.wait_for_timeout(50)
             except:
-                # If Control+a fails (e.g., on Mac), try alternative: select all + backspace
                 try:
-                    page_to_use.keyboard.press('Meta+a')  # Mac alternative
+                    page_to_use.keyboard.press('Meta+a')
                     page_to_use.wait_for_timeout(50)
                     page_to_use.keyboard.press('Delete')
                     page_to_use.wait_for_timeout(50)
                 except:
-                    # If clearing fails, continue anyway - typing will append/replace as needed
                     pass
             
-            # Type the text using Playwright's keyboard.type() (more reliable with Playwright mouse click)
             print(f"⌨️  Typing text: '{text}'")
             page_to_use.keyboard.type(text, delay=50)
             
-            # Automatically press Enter after typing to submit the form
-            # This is the default behavior for booking ID input fields - Enter key works on most forms
             print(f"⏎  Pressing Enter to submit")
             page_to_use.keyboard.press('Enter')
             
@@ -1003,11 +943,9 @@ class VisionHelpers:
             if not self.page or self.page.is_closed():
                 return None
             
-            # Use CDP to capture the entire window including browser UI
             cdp = self.page.context.new_cdp_session(self.page)
             screenshot_data = cdp.send("Page.captureScreenshot", {"captureBeyondViewport": False})
             
-            # Save the screenshot
             import base64
             with open(path, "wb") as f:
                 f.write(base64.b64decode(screenshot_data["data"]))
@@ -1016,7 +954,6 @@ class VisionHelpers:
         except Exception as e:
             print(f"⚠️  Window screenshot failed (trying fallback): {e}")
             try:
-                # Fallback to regular screenshot
                 self.page.screenshot(path=path, full_page=False, timeout=timeout, animations="disabled", caret="hide")
                 return str(path)
             except Exception as e2:
@@ -1065,14 +1002,35 @@ class PlaywrightManager:
         - Carrier links often open in new tabs/pages
         - IMPORTANT: page.context.pages is a PROPERTY (not a method) - use page.context.pages NOT page.context.pages()
         
-        - FOR SELECTOR-BASED CLICKS that might open new tabs:
+        - FOR SELECTOR-BASED CLICKS that might open new tabs (CARRIER LINKS ON AGGREGATOR SITES):
+          # CRITICAL: Close popups/overlays first, then scroll element into view, verify it's visible, then click
+          # This prevents clicking on ad overlays that might be covering the link
+          try:
+              page.keyboard.press("Escape")
+              page.wait_for_timeout(300)
+          except:
+              pass
           old_page = page
-          with page.context.expect_page() as new_page_info:
-              link.click()
+          link_locator = page.locator('text=EXACT_TEXT_FROM_INSTRUCTION')
+          link_locator.scroll_into_view_if_needed()
+          page.wait_for_timeout(500)
+          link_locator.wait_for(state='visible', timeout=5000)
+          try:
+              with page.context.expect_page(timeout=10000) as new_page_info:
+                  link_locator.click()
+          except Exception as e:
+              try:
+                  with page.context.expect_page(timeout=10000) as new_page_info:
+                      link_locator.click(force=True)
+              except Exception:
+                  raise e
           new_page = new_page_info.value
           if new_page:
-              page = new_page  # Switch to the new page
-              old_page.close()  # Close the aggregator tab
+              page = new_page
+              page.wait_for_load_state('domcontentloaded')
+              old_page.close()
+          else:
+              page.wait_for_load_state('domcontentloaded')
         
         - FOR COORDINATE-BASED CLICKS that might open new tabs (e-Service links, carrier links, etc.):
           vision_helpers.click_at_coordinates(x, y)
@@ -1130,7 +1088,6 @@ class PlaywrightManager:
         
         script = response.choices[0].message.content.strip()
         
-        # Remove markdown code blocks if present
         if script.startswith("```python"):
             script = script[9:]
         if script.startswith("```"):
@@ -1170,7 +1127,6 @@ class PlaywrightManager:
             prev_url = context.current_url
             carrier = context.carrier
             
-            # Extract domains for comparison
             def get_domain(url):
                 from urllib.parse import urlparse
                 try:
@@ -1183,24 +1139,26 @@ class PlaywrightManager:
             
             print(f"🔍 Validating new tab: {new_domain}")
             
-            # Quick URL-based checks
+            ad_indicators = ["ads", "advert", "marketing", "promo", "offer", "survey", "feedback", "redirect", "click", "track", "doubleclick", "googleads", "googlesyndication", "mapsplatform"]
+            is_ad_page = any(indicator in new_url.lower() for indicator in ad_indicators)
+            
+            if is_ad_page:
+                print(f"❌ Ad page detected: {new_domain}")
+                return False
+            
             url_valid = False
             
-            # Case 1: Same domain as previous (legitimate navigation within same site)
             if new_domain == prev_domain:
                 url_valid = True
                 print(f"✅ Same domain as previous page")
             
-            # Case 2: Contains carrier name
             elif carrier and carrier.lower() in new_url.lower():
                 url_valid = True
                 print(f"✅ URL contains carrier name: {carrier}")
             
-            # If URL alone suggests it's valid, skip expensive vision check
             if url_valid:
                 return True
             
-            # Otherwise, use vision to make final decision
             print(f"⚠️  URL check inconclusive, using vision validation...")
             
             try:
@@ -1251,7 +1209,6 @@ class PlaywrightManager:
                     max_tokens=10
                 )
                 
-                # Clean up temp file
                 import os
                 if os.path.exists(screenshot_path):
                     os.remove(screenshot_path)
@@ -1268,7 +1225,6 @@ class PlaywrightManager:
                 
             except Exception as vision_error:
                 print(f"⚠️  Vision validation failed: {vision_error}, allowing tab by default")
-                # If vision fails, be conservative and allow the tab
                 return True
                 
         except Exception as e:
@@ -1279,7 +1235,6 @@ class PlaywrightManager:
         if not self.page:
             return {"success": False, "error": "No page object available"}
         try:
-            # Capture state BEFORE execution
             tabs_before = len(self.page.context.pages)
             try:
                 url_before = self.page.url if not self.page.is_closed() else "unknown"
@@ -1293,7 +1248,6 @@ class PlaywrightManager:
             local_vars = {"page": self.page, "result": {}, "time": time}
             if vision_helpers:
                 local_vars["vision_helpers"] = vision_helpers
-            # Add booking_id from context if available
             if context and hasattr(context, 'booking_id') and context.booking_id:
                 local_vars["booking_id"] = context.booking_id
             exec(script, {}, local_vars)
@@ -1301,42 +1255,34 @@ class PlaywrightManager:
             if not isinstance(result, dict):
                 result = {}
             
-            # Check if script explicitly switched to a new page (script set page variable)
             new_page = local_vars.get("page")
             script_switched = new_page and new_page != self.page
             
             if vision_helpers and vision_helpers.page != self.page:
                 if not script_switched:
-                    # click_at_coordinates() switched but script didn't update page variable
-                    # Note: click_at_coordinates() already logged the switch, so we just detect it here
                     new_page = vision_helpers.page
                     script_switched = True
-                    # We'll check this later to avoid duplicate popup closing
                 elif new_page != vision_helpers.page:
-                    # Both switched but to different pages - use vision_helpers.page (from click_at_coordinates)
                     new_page = vision_helpers.page
                     script_switched = True
             
-            # Determine wait time based on script type
             if "click_at_coordinates" in script:
-                wait_time = 2.5  # Longer wait for coordinate clicks
+                wait_time = 2.5
             else:
-                wait_time = 1.5  # Standard wait for selector clicks
+                wait_time = 1.5
             
-            # Wait for any new tabs to be registered in context
             time.sleep(wait_time)
             
             tabs_after = len(self.page.context.pages)
             auto_switched = False
-            script_tab_valid = True  # Assume script's tab is valid if it switched
+            script_tab_valid = True
             
             if tabs_after > tabs_before:
                 print(f"🆕 New tab detected ({tabs_before} → {tabs_after})")
                 
                 all_pages = self.page.context.pages
-                new_tabs = all_pages[tabs_before:]  # Get newly opened tabs
+                new_tabs = all_pages[tabs_before:]
                 
-                # If script switched, validate its choice first
                 if script_switched and new_page in new_tabs:
                     try:
                         new_page.wait_for_load_state('domcontentloaded', timeout=5000)
@@ -1348,12 +1294,10 @@ class PlaywrightManager:
                         if not script_tab_valid:
                             print(f"⚠️  Script switched to tab, but validation failed: {new_page.url}")
                     else:
-                        script_tab_valid = True  # No context, assume valid
+                        script_tab_valid = True
                 
-                # If script's tab is invalid or script didn't switch, find best valid tab
                 if not script_switched or not script_tab_valid:
                     for new_tab in new_tabs:
-                        # Skip script's tab if it's invalid
                         if script_switched and new_tab == new_page and not script_tab_valid:
                             continue
                         
@@ -1374,7 +1318,6 @@ class PlaywrightManager:
                             new_page = new_tab
                             auto_switched = True
                             
-                            # Close any popups on the new tab (only if not already closed by click_at_coordinates)
                             if vision_helpers:
                                 vision_helpers.page = new_tab
                                 if not vision_helpers.popup_closed_by_click:
@@ -1385,7 +1328,7 @@ class PlaywrightManager:
                                 else:
                                     print(f"ℹ️  Popups already closed by click_at_coordinates(), skipping duplicate close")
                             
-                            break  # Use first valid tab
+                            break
                         else:
                             print(f"❌ Closing invalid tab: {new_tab.url}")
                             try:
@@ -1393,10 +1336,8 @@ class PlaywrightManager:
                             except:
                                 pass
                 elif script_switched and script_tab_valid:
-                    # Script's tab is valid, use it
                     print(f"✅ Script switched to valid tab: {new_page.url}")
                     
-                    # Close any popups on the new tab (only if not already closed by click_at_coordinates)
                     if vision_helpers:
                         vision_helpers.page = new_page
                         if not vision_helpers.popup_closed_by_click:
@@ -1409,61 +1350,46 @@ class PlaywrightManager:
                     
                     auto_switched = True
             
-            # Scenario B: Script switched but no new tabs (might be same-tab navigation)
-            # Validate the script's chosen tab if it switched
             elif script_switched:
                 if context and milestone:
                     try:
                         script_tab_valid = self.validate_new_tab(new_page, context, milestone)
                         if not script_tab_valid:
                             print(f"⚠️  Script switched to tab, but validation failed: {new_page.url}")
-                            # Script switched but tab is invalid - check current page
                             current_url = new_page.url if not new_page.is_closed() else "unknown"
                             print(f"⚠️  Current tab URL: {current_url}")
                     except Exception as e:
                         print(f"⚠️  Error validating script's tab: {e}")
-                        script_tab_valid = True  # Default to valid on error
+                        script_tab_valid = True
                 else:
                     script_tab_valid = True
                 
                 if script_tab_valid:
                     auto_switched = True
             
-            # Scenario C: Check for same-tab navigation (URL changed but no new tab)
             try:
                 url_after = self.page.url if not self.page.is_closed() else "unknown"
                 if url_after != "unknown" and url_after != url_before and tabs_after == tabs_before and not script_switched:
                     print(f"🔄 Same-tab navigation detected: {url_before} → {url_after}")
-                    # This is valid - navigation happened in same tab
             except:
                 pass
             
-            # Determine if we switched tabs (either script did or auto-detection did)
             switched_to_new_page = script_switched or auto_switched
             
-            # Don't include Page object in return dict (not JSON serializable)
-            # We'll get the new page reference from local_vars in the calling code
             return_dict = {
                 "success": True, 
                 "result": result,
                 "switched_to_new_page": switched_to_new_page
             }
             
-            # Check if click_at_coordinates already closed popups (from script execution)
-            # If the script used click_at_coordinates and it switched, popups may already be closed
             popup_already_closed_by_click = False
             if "click_at_coordinates" in script and switched_to_new_page:
-                # click_at_coordinates() handles popup closing internally when it switches tabs
-                # We need to check if it was actually called and succeeded
-                # This is a heuristic - if click_at_coordinates was in the script and we switched, assume it handled popups
                 popup_already_closed_by_click = True
             
             return_dict["popup_already_closed"] = popup_already_closed_by_click
             
-            # Store the new page reference in a way we can retrieve it (attach to return dict as attribute)
-            # This is a workaround since we can't serialize Page objects
             if switched_to_new_page:
-                return_dict["_new_page_ref"] = new_page  # Internal reference, not logged
+                return_dict["_new_page_ref"] = new_page
             
             return return_dict
         except Exception as e:
@@ -1861,6 +1787,50 @@ def vision_agent(client, screenshot_path, objective):
     return vision_result
 
 
+def adjust_vision_coordinates_for_scroll(vision_result, scroll_top):
+    """
+    Adjust vision result coordinates by adding scroll_top offset to y coordinates.
+    Vision model returns coordinates relative to the screenshot image, which may start
+    at scroll_top > 0. We need to add scroll_top to get absolute page coordinates.
+    
+    Args:
+        vision_result: Vision result dict with elements/input_groups
+        scroll_top: Scroll offset where screenshot was taken
+        
+    Returns:
+        Vision result with adjusted coordinates
+    """
+    if not scroll_top or scroll_top == 0:
+        return vision_result
+    
+    # Adjust elements array
+    if vision_result.get("elements"):
+        for elem in vision_result["elements"]:
+            if "y" in elem:
+                elem["y"] = elem["y"] + scroll_top
+    
+    # Adjust input_groups
+    if vision_result.get("input_groups"):
+        for group in vision_result["input_groups"]:
+            # Adjust input coordinates
+            if group.get("input") and "y" in group["input"]:
+                group["input"]["y"] = group["input"]["y"] + scroll_top
+            
+            # Adjust button coordinates if present
+            if group.get("submission") and group["submission"].get("button") and "y" in group["submission"]["button"]:
+                group["submission"]["button"]["y"] = group["submission"]["button"]["y"] + scroll_top
+    
+    # Adjust _original_input_groups if present (used when DOM validation filters out results)
+    if vision_result.get("_original_input_groups"):
+        for group in vision_result["_original_input_groups"]:
+            if group.get("input") and "y" in group["input"]:
+                group["input"]["y"] = group["input"]["y"] + scroll_top
+            if group.get("submission") and group["submission"].get("button") and "y" in group["submission"]["button"]:
+                group["submission"]["button"]["y"] = group["submission"]["button"]["y"] + scroll_top
+    
+    return vision_result
+
+
 def validate_input_fields_from_vision(vision_result, screenshot_path=None):
     """
     Validate that vision-identified elements are actually input fields by checking DOM.
@@ -2054,6 +2024,25 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     is_carrier_site = current_url and "seacargotracking" not in current_url and "google.com" not in current_url
     site_type = "CARRIER SITE" if is_carrier_site else "AGGREGATOR/OTHER"
     
+    carrier_link_text = None
+    if vision_info and not is_carrier_site:
+        for vision_result in vision_info:
+            if isinstance(vision_result, dict):
+                elements = vision_result.get("elements", [])
+                for element in elements:
+                    label = element.get("label", "")
+                    label_lower = label.lower()
+                    carrier_lower = carrier.lower()
+                    if carrier_lower in label_lower:
+                        if "merchant" in label_lower or "marine" in label_lower or carrier.upper() in label:
+                            carrier_link_text = label
+                            break
+                        elif len(label) > 3 and carrier_lower in label_lower:
+                            carrier_link_text = label
+                            break
+                if carrier_link_text:
+                    break
+    
     system_prompt = f"""You translate the reasoning agent's instructions into actionable code instructions.
 
     CURRENT CONTEXT:
@@ -2080,9 +2069,23 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     - If vision found input_groups but DOM validation filtered them out, STILL generate code if reasoning agent says to enter booking ID (use the coordinates from vision anyway)
     - Only say "no code needed" if goal is achieved or milestone is "Data extracted" or reasoning agent explicitly asks for more analysis first
 
+    CARRIER LINK CLICKING (AGGREGATOR SITES):
+    - **CRITICAL**: On aggregator sites (seacargotracking.net), when vision finds a carrier link with visible text:
+      * Check vision_info for elements with labels containing the carrier name
+      * Extract the EXACT text label from vision results (the label field from the element)
+      * ALWAYS: 1) Close popups/overlays first (try Escape key), 2) Use locator with scroll_into_view_if_needed() to ensure element is visible, 3) Wait 500ms, 4) Click with expect_page()
+      * This prevents clicking on ad overlays that might cover the link
+      * Use: Try Escape key, then page.locator('text=EXACT_TEXT').scroll_into_view_if_needed(), wait 500ms, then click with expect_page()
+      * Replace EXACT_TEXT with the actual text label found in vision results
+      * Example instruction: "Close any popups (try Escape key), then use page.locator('text=EXACT_CARRIER_LINK_TEXT').scroll_into_view_if_needed(), wait 500ms, then click with expect_page() to handle new tab"
+      * This is MORE RELIABLE than coordinates because text is deterministic and scrolling ensures visibility
+      * Text selectors work even if page layout changes slightly
+      * Only fall back to coordinates if text selector fails after retries
+    - When vision provides both text label AND coordinates → ALWAYS prefer text selector with popup closing and scrolling on aggregator sites
+    
     COORDINATE-BASED CLICKING (PRIORITIZE ON CARRIER SITES):
     - On carrier sites (URLs NOT containing 'seacargotracking'): ALWAYS use coordinate clicking when vision provides coordinates
-    - On aggregator sites: Use selectors first, coordinates as fallback
+    - On aggregator sites: Use text selectors first (when text is available), then coordinates as fallback
     - If reasoning agent provides coordinates (x, y) → instruct: "Use vision_helpers.click_at_coordinates(x, y)"
     - Vision coordinates with pyautogui are MORE RELIABLE than selectors on carrier sites
     - Avoids issues with overlays, modals, strict mode violations, and complex DOMs
@@ -2142,13 +2145,19 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     - **ALWAYS set needs_vision=true for "Data extracted" milestone** (to read data from screenshots)
     - Set needs_vision=false if you already have enough information (e.g., navigation to known URL)"""
     
+    vision_summary_str = json.dumps(vision_info, indent=2)
+    if carrier_link_text and not is_carrier_site:
+        vision_summary_str += f"\n\nEXTRACTED CARRIER LINK TEXT FROM VISION: '{carrier_link_text}'"
+        vision_summary_str += f"\nINSTRUCTION: Use this exact text in a Playwright text selector. Generate instruction like: 'Use page.click(\\'text={carrier_link_text}\\')' or 'Use page.locator(\\'text={carrier_link_text}\\').click()'"
+    
     prompt = f"""Context:
             {json.dumps(context, indent=2)}
 
             Vision Analysis:
-            {json.dumps(vision_info, indent=2)}
+            {vision_summary_str}
 
-            Based on the reasoning agent's instruction above, decide if code is needed and provide instruction for playwright manager."""
+            Based on the reasoning agent's instruction above, decide if code is needed and provide instruction for playwright manager.
+            {"IMPORTANT: Vision found carrier link with text: '" + carrier_link_text + "'. Generate instruction that: 1) Closes popups first (try Escape key), 2) Uses this exact text in a Playwright locator with scroll_into_view_if_needed() (e.g., 'Close popups (try Escape), then use page.locator(\\'text=" + carrier_link_text + "\\').scroll_into_view_if_needed(), wait 500ms, then click with expect_page()') instead of coordinates on aggregator sites. This ensures the link is visible and not covered by ads." if carrier_link_text and not is_carrier_site else ""}"""
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
@@ -2768,6 +2777,14 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     logger.log_operation("vision_query", {"screenshot": screenshot["path"], "objective": vision_objective})
                     try:
                         vision_result = vision_agent(client, screenshot["path"], vision_objective)
+                        
+                        # CRITICAL: Adjust coordinates by scroll_top offset
+                        # Vision returns coordinates relative to screenshot image, but we need absolute page coordinates
+                        scroll_top = screenshot.get("scroll_top", 0)
+                        if scroll_top > 0:
+                            vision_result = adjust_vision_coordinates_for_scroll(vision_result, scroll_top)
+                            print(f"📍 Adjusted vision coordinates by scroll_top={scroll_top}px")
+                        
                         logger.log_operation("vision_response", vision_result)
                         
                         # Store original vision result before DOM validation (for fallback)
@@ -2910,6 +2927,11 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     logger.log_operation("vision_query_post_execution", {"screenshot": screenshot["path"], "objective": post_vision_objective})
                     try:
                         vision_result = vision_agent(client, screenshot["path"], post_vision_objective)
+                         
+                        scroll_top = screenshot.get("scroll_top", 0)
+                        if scroll_top > 0:
+                            vision_result = adjust_vision_coordinates_for_scroll(vision_result, scroll_top)
+                         
                         logger.log_operation("vision_response_post_execution", vision_result)
                         post_execution_vision_results.append(vision_result)
                         if vision_result.get("found"):
