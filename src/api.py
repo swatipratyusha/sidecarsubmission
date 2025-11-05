@@ -325,7 +325,6 @@ class CurrentContext:
         self.history = []
         self.extracted_data = {}
         self.vision_analysis_after_action = None
-        self.tab_analysis = None  # Store tab information from window screenshots
     
     def set_goal(self, booking_id, carrier="hmm"):
         self.goal = f"Extract voyage number and arrival date for booking {booking_id}"
@@ -406,7 +405,6 @@ class CurrentContext:
             "remaining_milestones": self.remaining_milestones,
             "current_window_screenshot": self.current_window_screenshot,
             "tab_screenshots": self.tab_screenshots,
-            "tab_analysis": self.tab_analysis,
             "history": self.history,
             "extracted_data": self.extracted_data,
             "vision_analysis_after_action": self.vision_analysis_after_action,
@@ -876,8 +874,8 @@ class VisionHelpers:
     
     def click_and_type_at_coordinates(self, x, y, text, scroll_into_view=True):
         """
-        Click at viewport coordinates and type text directly using keyboard.
-        This is more reliable than clicking and then using page.fill() with selectors.
+        Click at viewport coordinates using Playwright's mouse click, then type text.
+        Uses pure Playwright methods (no pyautogui) for better focus handling.
         
         Args:
             x: X coordinate in viewport (from vision model)
@@ -889,27 +887,111 @@ class VisionHelpers:
             dict with {"success": bool, "new_page": Page or None, "switched": bool}
         """
         try:
-            # First, click at coordinates (using existing method)
-            click_result = self.click_at_coordinates(x, y, scroll_into_view)
+            # Scroll to bring coordinates into view if needed
+            # Vision coordinates are viewport-relative (0,0 = top-left of visible area)
+            if scroll_into_view:
+                viewport = self.page.viewport_size or {"width": 1280, "height": 720}
+                viewport_height = viewport["height"]
+                
+                # If y coordinate is near the bottom or outside viewport, scroll to center it
+                # We scroll the page so that the target y is in the middle of the viewport
+                current_scroll = self.page.evaluate("window.pageYOffset")
+                absolute_y = current_scroll + y
+                target_scroll = max(0, absolute_y - viewport_height // 2)
+                
+                if abs(current_scroll - target_scroll) > 10:  # Only scroll if significant difference
+                    self.page.evaluate(f"window.scrollTo(0, {target_scroll})")
+                    self.page.wait_for_timeout(500)  # Wait for scroll animation
+                    
+                    # Recalculate y in new viewport (should be approximately viewport_height/2)
+                    new_scroll = self.page.evaluate("window.pageYOffset")
+                    y = absolute_y - new_scroll
             
-            if not click_result.get("success"):
-                return click_result
+            # Check if clicking might open a new tab (for carrier links, e-Service links, etc.)
+            new_page = None
+            switched = False
             
-            # If a new tab opened, we need to type on the new page
-            if click_result.get("switched") and click_result.get("new_page"):
-                page_to_use = click_result["new_page"]
-            else:
+            # Use Playwright's native mouse click (viewport coordinates)
+            print(f"🖱️  Clicking at viewport coordinates ({x}, {y}) using Playwright mouse")
+            
+            try:
+                # Try to detect if click opens new tab
+                with self.page.context.expect_page(timeout=3000) as new_page_info:
+                    self.page.mouse.click(x, y)
+                
+                new_page = new_page_info.value
+                if new_page:
+                    print(f"✅ New tab opened! Switching to: {new_page.url}")
+                    try:
+                        new_page.wait_for_load_state('domcontentloaded', timeout=5000)
+                    except:
+                        pass
+                    
+                    old_url = self.page.url if not self.page.is_closed() else "unknown"
+                    self.page = new_page
+                    new_page.bring_to_front()
+                    switched = True
+                    
+                    print(f"🔄 Switched from {old_url} → {new_page.url}")
+                    
+                    # Close any popups on the new tab
+                    popup_closed = False
+                    try:
+                        popup_closed = self.close_popup()
+                        self.popup_closed_by_click = popup_closed
+                    except Exception as popup_error:
+                        print(f"⚠️  Popup closing failed: {popup_error}")
+                    
+                    page_to_use = new_page
+                else:
+                    page_to_use = self.page
+                    
+            except Exception as expect_error:
+                # TimeoutError or other exception - no new tab opened (expected for same-tab navigation)
+                # The click already happened inside the expect_page() context, so we just continue
+                print(f"ℹ️  No new tab detected (same-tab navigation): {type(expect_error).__name__}")
                 page_to_use = self.page
             
-            # Wait a brief moment for the input field to be ready
+            # Wait a brief moment for the input field to be ready and focused
             page_to_use.wait_for_timeout(300)
             
-            # Type the text directly using keyboard (more reliable after coordinate click)
-            print(f"⌨️  Typing text at clicked coordinates: '{text}'")
+            # Clear any existing text in the input field first to prevent duplication
+            # The field should already be focused from the click above
+            try:
+                # Select all text using keyboard shortcut (works on Windows/Linux)
+                page_to_use.keyboard.press('Control+a')
+                page_to_use.wait_for_timeout(50)
+                # Delete the selected text
+                page_to_use.keyboard.press('Delete')
+                page_to_use.wait_for_timeout(50)
+            except:
+                # If Control+a fails (e.g., on Mac), try alternative: select all + backspace
+                try:
+                    page_to_use.keyboard.press('Meta+a')  # Mac alternative
+                    page_to_use.wait_for_timeout(50)
+                    page_to_use.keyboard.press('Delete')
+                    page_to_use.wait_for_timeout(50)
+                except:
+                    # If clearing fails, continue anyway - typing will append/replace as needed
+                    pass
+            
+            # Type the text using Playwright's keyboard.type() (more reliable with Playwright mouse click)
+            print(f"⌨️  Typing text: '{text}'")
             page_to_use.keyboard.type(text, delay=50)
             
-            print(f"✅ Successfully typed text at coordinates")
-            return click_result
+            # Automatically press Enter after typing to submit the form
+            # This is the default behavior for booking ID input fields - Enter key works on most forms
+            print(f"⏎  Pressing Enter to submit")
+            page_to_use.keyboard.press('Enter')
+            
+            print(f"✅ Successfully entered text and submitted (Enter key)")
+            
+            return {
+                "success": True,
+                "new_page": new_page,
+                "switched": switched,
+                "popup_closed": self.popup_closed_by_click if switched else False
+            }
             
         except Exception as e:
             print(f"⚠️  Click and type at coordinates failed: {e}")
@@ -970,7 +1052,7 @@ class PlaywrightManager:
         - If instruction provides coordinates (x, y), use vision_helpers.click_at_coordinates(x, y)
         - This uses pyautogui for OS-level clicks, avoiding Playwright selector issues
         - Automatically handles scrolling and coordinate conversion
-        - Example: vision_helpers.click_at_coordinates(645, 62)
+        - Example: vision_helpers.click_at_coordinates(x, y)
         - More reliable than selectors for elements in overlays, modals, or complex DOMs
 
         URL NAVIGATION:
@@ -1003,10 +1085,25 @@ class PlaywrightManager:
         - FOR CLICKING AND TYPING INTO INPUT FIELDS (when coordinates are known):
           # IMPORTANT: Use click_and_type_at_coordinates() instead of click_at_coordinates() + page.fill()
           # This avoids timeout issues with page.fill() after coordinate clicks
-          vision_helpers.click_and_type_at_coordinates(x, y, 'text_to_enter')
+          vision_helpers.click_and_type_at_coordinates(x, y, booking_id)
           # This method handles clicking, waiting for input to be ready, and typing directly
           # No need to call page.fill() separately - it's all handled internally
-          # Example: vision_helpers.click_and_type_at_coordinates(689, 130, 'SINI25432400')
+          # Example: vision_helpers.click_and_type_at_coordinates(689, 130, booking_id)
+        
+        - FOR SUBMITTING INPUT FIELDS:
+          # DEFAULT METHOD (preferred): click_and_type_at_coordinates() automatically presses Enter after typing
+          vision_helpers.click_and_type_at_coordinates(x, y, booking_id)
+          # Note: Enter key is automatically pressed inside click_and_type_at_coordinates(), no need to call it separately
+          page.wait_for_load_state('load')
+          
+          # FALLBACK METHOD (only if Enter doesn't work): Click Search button after typing
+          # Only use this if Enter key submission failed (detected via post-execution vision)
+          vision_helpers.click_and_type_at_coordinates(x, y, booking_id)
+          # Skip Enter key (already tried) and click button instead
+          vision_helpers.click_at_coordinates(button_x, button_y)
+          page.wait_for_load_state('load')
+          
+          # Always wait for page load after submission to ensure results are loaded
         
         - IMPORTANT: You MUST reassign the 'page' variable (page = pages[-1] or page = new_page) for the system to detect the tab switch
         - The 'page' variable reassignment is what triggers automatic page reference updates in the automation system
@@ -1196,6 +1293,9 @@ class PlaywrightManager:
             local_vars = {"page": self.page, "result": {}, "time": time}
             if vision_helpers:
                 local_vars["vision_helpers"] = vision_helpers
+            # Add booking_id from context if available
+            if context and hasattr(context, 'booking_id') and context.booking_id:
+                local_vars["booking_id"] = context.booking_id
             exec(script, {}, local_vars)
             result = local_vars.get("result")
             if not isinstance(result, dict):
@@ -1522,13 +1622,42 @@ def reasoning_agent(client, context):
     - On CARRIER SITES (not aggregator): Prioritize coordinate clicking over selectors when vision provides coordinates
     - On AGGREGATOR SITES: Use selectors first, coordinates as fallback
     - Coordinate clicking with pyautogui is MORE RELIABLE on carrier sites (avoids overlays, modals, strict mode)
-    - Example instruction: "Vision found input at (645, 62). Use vision_helpers.click_at_coordinates(645, 62)"
+    - Example instruction: "Vision found input at (x, y). Use vision_helpers.click_at_coordinates(x, y)"
+
+    HANDLING MULTIPLE INPUT FIELDS (when next_milestone is about entering booking ID):
+    - When setting vision_objective, be EXPLICIT: "Locate ACTUAL TEXT INPUT FIELDS (rectangular boxes for typing) - NOT buttons, NOT links, ONLY input fields"
+    - When vision returns "input_groups" (array of input fields with submission context):
+      1. Select the input with HIGHEST relevance_score (0.0-1.0)
+      2. If multiple inputs have similar relevance, prioritize:
+         * Input with label containing "Booking", "B/L", "BL", "Container" > generic "Search"
+         * Input in top navigation bar > input in body forms
+         * Input with clear submission method > ambiguous submission
+      3. Use the submission.method from vision analysis:
+         * "button_click": Instruct to click input, type booking ID, then click the button
+         * "enter_key": Instruct to click input, type booking ID, then press Enter key
+      4. Include button coordinates if method is "button_click"
+      5. Example instruction format:
+         - Button click: "Click input at (x, y), type booking_id, then click Search button at (x, y)"
+         - Enter key: "Click input at (x, y), type booking_id, then press Enter key"
+    - If vision doesn't provide input_groups but has elements, use fallback logic:
+      * Look for elements with labels containing "input", "search", "booking"
+      * If Search button found nearby (within 300px), use button_click method
+      * Otherwise, default to enter_key method
 
     CRITICAL URL RESTRICTIONS - NEVER VIOLATE THESE:
     - NEVER EVER instruct direct navigation to carrier sites
     - NEVER suggest page.goto() with any carrier domain URLs in your language_instruction
     - To reach carrier site: ALWAYS instruct to "find and click the {carrier} carrier link on the aggregator site"
     - Only allow page.goto() for known aggregator sites (e.g., "navigate to seacargotracking.net" is OK)
+
+    HANDLING "Data extracted" MILESTONE:
+    - When next_milestone is "Data extracted", your job is DIFFERENT:
+      * DO NOT generate code to extract data using DOM selectors
+      * INSTEAD: Instruct vision agent to read voyage number and arrival date directly from the screenshots
+      * Set vision_objective: "Extract the voyage number and arrival date (or ETA) from the visible tracking results on this page. Look for text that contains voyage/vessel information and arrival/ETA dates. Return the exact values as they appear on screen."
+      * Set language_instruction: "Extract voyage number and arrival date from vision analysis results - no code execution needed, just read from screenshots"
+      * The vision agent will return the data in its response, and the system will parse it automatically
+      * This is more reliable than DOM selectors which often fail due to complex page structures
 
     CRITICAL REMINDER:
     Your ONLY job this step is: "{next_milestone}"
@@ -1576,8 +1705,95 @@ def vision_agent(client, screenshot_path, objective):
     with open(screenshot_path, "rb") as f:
         image_data = base64.b64encode(f.read()).decode("utf-8")
     
+    # Check if objective is asking for input field analysis with submission context
+    is_input_field_analysis = any(keyword in objective.lower() for keyword in [
+        "input field", "text input", "booking id input", "b/l input", "container input",
+        "enter booking", "enter the id", "input for booking"
+    ])
+    
     # Build complete system prompt
-    system_prompt = f"""You are a vision analysis agent. You analyze screenshots to understand page state and locate elements.
+    if is_input_field_analysis:
+        system_prompt = f"""You are a vision analysis agent specialized in analyzing input fields and their submission mechanisms.
+
+    CURRENT OBJECTIVE:
+    {objective}
+
+    CRITICAL REQUIREMENTS - READ CAREFULLY:
+    - You MUST identify ACTUAL TEXT INPUT FIELDS (rectangular boxes where users type text)
+    - DO NOT return buttons (Login, Search, Submit, etc.) - these are NOT input fields
+    - DO NOT return links, dropdowns, or clickable elements - ONLY text input boxes
+    - Input fields are typically: white/gray rectangular boxes with borders, often with placeholder text or labels
+    - Buttons are typically: colored/shaded elements with text labels, often rounded or styled differently
+    
+    YOUR JOB:
+    - Find ALL ACTUAL TEXT INPUT FIELDS (not buttons, not links, not dropdowns) that could potentially accept booking IDs, B/L numbers, container numbers, or tracking references
+    - Visually identify rectangular input boxes where text can be typed
+    - For EACH input field found, analyze its SUBMISSION CONTEXT:
+      * Check if there's a Search/Submit/Go/Find button nearby (within 300 pixels horizontally)
+      * Determine if the input is part of a form (multiple fields) or standalone
+      * Assess visual layout: is button to the right, below, or integrated?
+      * Note if input appears in top navigation bar (often accepts Enter key)
+      * Note if input is in a dedicated search section (may have button)
+    
+    EXCLUSION LIST - DO NOT RETURN THESE:
+    - Login buttons, Search buttons, Submit buttons, Navigation buttons
+    - Links (text or image links)
+    - Dropdown menus or select elements
+    - Icons, logos, or images
+    - Menu items or navigation elements
+    - Any element that is NOT a text input field (rectangular box for typing)
+    
+    SPATIAL ANALYSIS:
+    - Calculate distance between input field and any nearby buttons
+    - Buttons within 300px horizontally are considered "nearby"
+    - IMPORTANT: Even if a button is nearby, Enter key is ALWAYS tried first (it works on most forms)
+    - Button click is only used as a fallback if Enter key doesn't work
+    - Most booking/tracking input fields accept Enter key for submission, even when a button is visible
+    
+    RELEVANCE SCORING:
+    - Inputs with labels/placeholders containing "Booking", "B/L", "BL", "Container", "CNTR", "Tracking", "Reference" → higher relevance
+    - Inputs in top navigation/search bars → medium-high relevance
+    - Inputs in schedule/search forms → medium relevance
+    - Inputs in unrelated sections (contact forms, etc.) → lower relevance
+    - ONLY score actual input fields - exclude buttons and other elements from scoring
+
+    OUTPUT FORMAT (use this EXACT structure):
+    {{
+    "found": boolean,
+    "input_groups": [
+        {{
+            "input": {{
+                "label": "descriptive label of input field (MUST be an actual input box, NOT a button)",
+                "x": x_coordinate,
+                "y": y_coordinate,
+                "confidence": 0.0-1.0
+            }},
+            "submission": {{
+                "method": "enter_key" | "button_click",
+                "button": {{
+                    "label": "button text/label",
+                    "x": x_coordinate,
+                    "y": y_coordinate,
+                    "confidence": 0.0-1.0
+                }} | null,
+                "button_distance": distance_in_pixels | null,
+                "reasoning": "explanation of why this submission method was chosen. NOTE: Always prefer 'enter_key' as the default - it works on most forms. Only use 'button_click' if Enter key is explicitly known to not work."
+            }},
+            "relevance_score": 0.0-1.0,
+            "relevance_reasoning": "why this input is relevant for booking ID entry"
+        }}
+    ],
+    "elements": [{{"label": "name", "x": coord, "y": coord, "confidence": 0.0-1.0}}],  // Keep for backward compatibility
+    "notes": "overall observations about input fields and submission mechanisms found"
+    }}
+    
+    VALIDATION CHECKLIST BEFORE RETURNING:
+    - For each input_group: Verify the "input" element is actually a rectangular text input box (not a button)
+    - Double-check coordinates point to an input field (white/gray box with border), not a button (colored element)
+    - If unsure whether something is an input or button, do NOT include it - only return elements you're CERTAIN are input fields
+    - If you find 0 input fields, return {{"found": false, "input_groups": [], "notes": "No text input fields found for booking ID entry"}}"""
+    else:
+        system_prompt = f"""You are a vision analysis agent. You analyze screenshots to understand page state and locate elements.
 
     CURRENT OBJECTIVE:
     {objective}
@@ -1613,58 +1829,19 @@ def vision_agent(client, screenshot_path, objective):
     prompt = f"""Objective: {objective}
             Analyze this screenshot and locate the elements."""
 
+    # Use more accurate vision model for input field analysis (critical for avoiding hallucinations)
+    vision_model = "gpt-4o" if is_input_field_analysis else "gpt-4.1-mini"
+
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=vision_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": [
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
             ]}
-        ]
-    )
-    
-    result = response.choices[0].message.content.strip()
-    
-    # Extract JSON
-    start = result.find("{")
-    end = result.rfind("}") + 1
-    if start != -1 and end > start:
-        result = result[start:end]
-    
-    return json.loads(result)
-
-
-def analyze_window_for_tabs(client, window_screenshot_path):
-    """Analyze a window screenshot to extract tab information"""
-    with open(window_screenshot_path, "rb") as f:
-        image_data = base64.b64encode(f.read()).decode("utf-8")
-    
-    prompt = """Analyze this browser window screenshot. Extract:
-    1. Total number of open tabs (count all visible browser tabs)
-    2. Tab names/titles if visible (list each tab's title from left to right)
-    3. Which tab is currently active (usually highlighted or has different styling)
-    4. Any visual indicators of tab state (loading, favicon, etc.)
-    
-    Return JSON format:
-    {
-        "tab_count": <number>,
-        "tabs": [
-            {"index": 0, "title": "Tab title", "active": true/false},
-            {"index": 1, "title": "Tab title", "active": true/false}
         ],
-        "notes": "Any additional observations about tabs"
-    }"""
-    
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "You are analyzing browser window screenshots to extract tab information. Be precise about counting tabs and reading tab titles."},
-            {"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
-            ]}
-        ]
+        temperature=0.0  # Lower temperature for more deterministic results
     )
     
     result = response.choices[0].message.content.strip()
@@ -1675,7 +1852,198 @@ def analyze_window_for_tabs(client, window_screenshot_path):
     if start != -1 and end > start:
         result = result[start:end]
     
-    return json.loads(result)
+    vision_result = json.loads(result)
+    
+    # Validate input field results using DOM inspection if available
+    if is_input_field_analysis and vision_result.get("input_groups"):
+        vision_result = validate_input_fields_from_vision(vision_result, screenshot_path)
+    
+    return vision_result
+
+
+def validate_input_fields_from_vision(vision_result, screenshot_path=None):
+    """
+    Validate that vision-identified elements are actually input fields by checking DOM.
+    Filters out hallucinations (buttons, links, etc.) and ensures we only return real input fields.
+    """
+    if not vision_result.get("input_groups"):
+        return vision_result
+    
+    # This validation happens after vision returns results
+    # We'll validate when we have access to the page object
+    # For now, add a flag to indicate validation is needed
+    validated_groups = []
+    
+    for group in vision_result.get("input_groups", []):
+        input_info = group.get("input", {})
+        label = input_info.get("label", "").lower()
+        
+        # Filter out obvious non-input elements based on label keywords
+        exclude_keywords = [
+            "button", "login", "submit", "search button", "link", "icon", 
+            "logo", "menu", "dropdown", "select", "navigation"
+        ]
+        
+        # If label contains exclusion keywords, it's likely not an input field
+        if any(keyword in label for keyword in exclude_keywords):
+            continue
+        
+        # Keep inputs that explicitly mention input-related terms OR have relevance score
+        include_keywords = [
+            "input", "field", "text", "search", "booking", "b/l", "bl", 
+            "container", "cntr", "tracking", "reference"
+        ]
+        
+        # Must have at least one include keyword or be in top nav area (low y-coord)
+        has_include_keyword = any(keyword in label for keyword in include_keywords)
+        is_top_nav = input_info.get("y", 9999) < 100  # Top navigation area
+        
+        if has_include_keyword or is_top_nav:
+            # Add validation flag - will be checked against DOM later
+            group["_needs_dom_validation"] = True
+            validated_groups.append(group)
+    
+    # Update result with filtered groups
+    original_count = len(vision_result.get("input_groups", []))
+    vision_result["input_groups"] = validated_groups
+    vision_result["found"] = len(validated_groups) > 0
+    
+    if len(validated_groups) < original_count:
+        vision_result["notes"] = (vision_result.get("notes", "") + 
+            f" [Filtered: Removed {original_count - len(validated_groups)} non-input elements]")
+    
+    return vision_result
+
+
+def validate_input_fields_against_dom(page, vision_result):
+    """
+    Use Playwright to verify that coordinates from vision actually point to input fields.
+    This is called after vision returns results, when we have page access.
+    Improved to account for scroll position and provide fallback for high-confidence vision results.
+    """
+    if not vision_result.get("input_groups"):
+        return vision_result
+    
+    validated_groups = []
+    
+    for group in vision_result.get("input_groups", []):
+        input_info = group.get("input", {})
+        x, y = input_info.get("x"), input_info.get("y")
+        confidence = input_info.get("confidence", 0.0)
+        label = input_info.get("label", "").lower()
+        relevance_score = group.get("relevance_score", 0.0)
+        
+        try:
+            # Get current scroll position to account for viewport-relative coordinates
+            scroll_info = page.evaluate("""() => ({
+                scrollX: window.pageXOffset || window.scrollX || 0,
+                scrollY: window.pageYOffset || window.scrollY || 0,
+                viewportWidth: window.innerWidth,
+                viewportHeight: window.innerHeight
+            })""")
+            
+            # Use JavaScript to check what element is at these coordinates
+            # Also check nearby coordinates in case vision was slightly off
+            # Use wider search area (±10px) for better matching
+            element_info = page.evaluate(f"""
+                () => {{
+                    // Check primary coordinate and nearby offsets (handles slight coordinate inaccuracies)
+                    // Wider search area for better matching
+                    const offsets = [
+                        [0, 0], [5, 0], [-5, 0], [0, 5], [0, -5], 
+                        [5, 5], [-5, -5], [10, 0], [-10, 0], [0, 10], [0, -10],
+                        [10, 5], [-10, 5], [5, 10], [-5, 10]
+                    ];
+                    let bestMatch = null;
+                    
+                    for (const [dx, dy] of offsets) {{
+                        const el = document.elementFromPoint({x} + dx, {y} + dy);
+                        if (!el) continue;
+                        
+                        const tagName = el.tagName.toLowerCase();
+                        const isInput = tagName === 'input' && 
+                            (el.type === 'text' || el.type === 'search' || el.type === '' || !el.type || el.type === 'tel' || el.type === 'url');
+                        const isTextarea = tagName === 'textarea';
+                        const hasContentEditable = el.contentEditable === 'true';
+                        
+                        if (isInput || isTextarea || hasContentEditable) {{
+                            bestMatch = {{
+                                isInput: true,
+                                tagName: tagName,
+                                type: el.type || null,
+                                id: el.id || null,
+                                name: el.name || null,
+                                placeholder: el.placeholder || null,
+                                offsetX: dx,
+                                offsetY: dy
+                            }};
+                            break;
+                        }}
+                    }}
+                    
+                    // If no input found at primary or nearby coordinates, return what's at primary coordinate
+                    if (!bestMatch) {{
+                        const el = document.elementFromPoint({x}, {y});
+                        return {{
+                            isInput: false,
+                            tagName: el ? el.tagName.toLowerCase() : null,
+                            type: el ? (el.type || null) : null
+                        }};
+                    }}
+                    
+                    return bestMatch;
+                }}
+            """)
+            
+            if element_info.get("isInput"):
+                # Valid input field - add DOM confirmation
+                group["_dom_validated"] = True
+                group["_dom_info"] = element_info
+                # Adjust coordinates if offset was needed
+                if element_info.get("offsetX") or element_info.get("offsetY"):
+                    input_info["x"] = x + element_info.get("offsetX", 0)
+                    input_info["y"] = y + element_info.get("offsetY", 0)
+                    print(f"✅ Adjusted coordinates by ({element_info.get('offsetX', 0)}, {element_info.get('offsetY', 0)}) for better input field alignment")
+                validated_groups.append(group)
+            else:
+                # DOM validation failed - but check if we should use fallback
+                # FALLBACK: If vision confidence is high (>0.9) AND relevance score is high (>0.8) 
+                # AND label contains input-related keywords, keep it but mark as unvalidated
+                input_keywords = ["input", "field", "booking", "b/l", "bl", "container", "cntr", "search", "text"]
+                has_input_keyword = any(keyword in label for keyword in input_keywords)
+                
+                if confidence >= 0.9 and relevance_score >= 0.8 and has_input_keyword:
+                    # High confidence vision result - keep it but mark as needing verification
+                    print(f"⚠️  DOM validation failed for ({x}, {y}) but keeping due to high vision confidence ({confidence:.2f}) and relevance ({relevance_score:.2f})")
+                    group["_dom_validated"] = False
+                    group["_dom_validation_failed"] = True
+                    group["_fallback_used"] = True
+                    validated_groups.append(group)
+                else:
+                    # Not an input field and no fallback criteria met - skip it
+                    print(f"⚠️  Vision coordinate ({x}, {y}) points to {element_info.get('tagName')}, not an input field - filtering out")
+                    continue
+                
+        except Exception as e:
+            # If validation fails, be conservative and include it (might be valid)
+            print(f"⚠️  DOM validation failed for ({x}, {y}): {e}")
+            group["_dom_validated"] = False
+            group["_dom_validation_error"] = str(e)
+            # Fallback: if vision confidence is high, keep it anyway
+            if confidence >= 0.9:
+                group["_fallback_used"] = True
+                print(f"✅ Keeping input despite validation error due to high vision confidence ({confidence:.2f})")
+            validated_groups.append(group)
+    
+    # Update result
+    original_count = len(vision_result.get("input_groups", []))
+    vision_result["input_groups"] = validated_groups
+    vision_result["found"] = len(validated_groups) > 0
+    
+    if len(validated_groups) < original_count:
+        print(f"✅ DOM validation: Kept {len(validated_groups)} valid input fields, filtered out {original_count - len(validated_groups)} non-input elements")
+    
+    return vision_result
 
 
 def language_agent(client, context, vision_info, reasoning_instruction=None):
@@ -1703,11 +2071,14 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     2. Write clear instructions for code generation based on what reasoning agent said
 
     CRITICAL RULES:
+    - **If milestone is "Data extracted" → YOU MUST set needs_code=false** - data extraction uses vision to read from screenshots, NO code execution needed
     - **If reasoning agent says "navigate to X" → YOU MUST set needs_code=true and generate navigation instruction**
     - **If reasoning agent says "click Y" → YOU MUST set needs_code=true and generate click instruction**
-    - **If reasoning agent says "enter booking ID" → YOU MUST set needs_code=true and generate input instruction**
-    - DO NOT say "no code needed" when reasoning agent explicitly requests an action
-    - Only say "no code needed" if goal is achieved or reasoning agent explicitly asks for more analysis first
+    - **If reasoning agent says "enter booking ID" or "type booking ID" or "Found text input for B/L or Booking ID and entered the ID" → YOU MUST set needs_code=true and generate input instruction, EVEN IF vision validation failed or input_groups is empty**
+    - **If milestone is "Found text input for B/L or Booking ID and entered the ID" → YOU MUST set needs_code=true to actually enter the booking ID**
+    - DO NOT say "no code needed" when reasoning agent explicitly requests an action, especially booking ID entry
+    - If vision found input_groups but DOM validation filtered them out, STILL generate code if reasoning agent says to enter booking ID (use the coordinates from vision anyway)
+    - Only say "no code needed" if goal is achieved or milestone is "Data extracted" or reasoning agent explicitly asks for more analysis first
 
     COORDINATE-BASED CLICKING (PRIORITIZE ON CARRIER SITES):
     - On carrier sites (URLs NOT containing 'seacargotracking'): ALWAYS use coordinate clicking when vision provides coordinates
@@ -1715,6 +2086,26 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     - If reasoning agent provides coordinates (x, y) → instruct: "Use vision_helpers.click_at_coordinates(x, y)"
     - Vision coordinates with pyautogui are MORE RELIABLE than selectors on carrier sites
     - Avoids issues with overlays, modals, strict mode violations, and complex DOMs
+
+    HANDLING INPUT FIELDS WITH SUBMISSION METHODS:
+    - **DEFAULT BEHAVIOR: Enter key is ALWAYS tried first** - click_and_type_at_coordinates() automatically presses Enter after typing
+    - When vision provides "input_groups" (structured input field data):
+      1. Use the input coordinates from vision analysis (not hardcoded)
+      2. **PREFER Enter key method** - click_and_type_at_coordinates() already includes Enter key press
+      3. Generate instruction: "Use vision_helpers.click_and_type_at_coordinates(x, y, booking_id)" - this will automatically click, type, and press Enter
+      4. Only use button_click as a fallback if Enter key doesn't work (detected via post-execution vision analysis)
+      5. Use booking_id from context (DO NOT hardcode the ID value)
+      6. Example (default/preferred): "vision_helpers.click_and_type_at_coordinates(x, y, booking_id)" - Enter is automatic
+      7. Example (fallback only): "vision_helpers.click_and_type_at_coordinates(x, y, booking_id); vision_helpers.click_at_coordinates(button_x, button_y)" - only if Enter failed
+    - **FALLBACK WHEN DOM VALIDATION FAILED**: If vision found input_groups but they were filtered out by DOM validation, AND reasoning agent says to enter booking ID:
+      * Check if vision_results contain "_original_input_groups" field (this means DOM validation filtered them out but original vision data exists)
+      * If "_original_input_groups" exists, use those coordinates: Extract input coordinates from _original_input_groups and use "vision_helpers.click_and_type_at_coordinates(x, y, booking_id)"
+      * Also check if vision_results contain any elements with coordinates (even if input_groups is empty)
+      * If found, use those coordinates with booking_id: "vision_helpers.click_and_type_at_coordinates(x, y, booking_id)"
+      * If no coordinates available, instruct to use vision again to locate input field
+      * IMPORTANT: When using _original_input_groups, still generate code - DOM validation failure doesn't mean the coordinates are wrong, just that we couldn't verify them
+    - When reasoning agent mentions submission method explicitly, use those coordinates and method
+    - NEVER hardcode coordinates or booking IDs - always use values from vision/context
 
     RESTRICTIONS:
     - NEVER EVER instruct to hardcode/guess carrier URLs
@@ -1726,6 +2117,14 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     REMINDER FOR THIS STEP:
     - Focus ONLY on: "{next_milestone}"
     - On {site_type}: {"PRIORITIZE coordinate clicking" if is_carrier_site else "Use selectors first, coordinates as fallback"}
+
+    HANDLING "Data extracted" MILESTONE:
+    - When milestone is "Data extracted":
+      * Set needs_code=false (no code execution - we read from screenshots)
+      * Set needs_vision=true (vision will read the data from screenshots)
+      * Set instruction: "Extract voyage number and arrival date from vision analysis results"
+      * Set data_to_extract: ["voyage_number", "arrival_date"]
+      * The system will automatically extract these values from vision results after vision analysis completes
 
     OUTPUT:
     {{
@@ -1740,6 +2139,7 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     - If you need to find elements on the page (carrier links, input fields, buttons, etc.)
     - If reasoning agent says "find" or "locate" something
     - If you need to analyze what's visible before generating code
+    - **ALWAYS set needs_vision=true for "Data extracted" milestone** (to read data from screenshots)
     - Set needs_vision=false if you already have enough information (e.g., navigation to known URL)"""
     
     prompt = f"""Context:
@@ -1769,6 +2169,91 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     return json.loads(result)
 
 
+def extract_data_from_vision_results(client, vision_results):
+    """
+    Extract voyage number and arrival date from vision analysis results using GPT.
+    This analyzes the vision notes and elements to find the exact values.
+    """
+    if not vision_results or len(vision_results) == 0:
+        return {"voyage_number": "", "arrival_date": ""}
+    
+    # Combine all vision data into a single text for analysis
+    vision_summary = []
+    for vision_result in vision_results:
+        notes = vision_result.get("notes", "")
+        elements = vision_result.get("elements", [])
+        
+        vision_summary.append(f"Notes: {notes}")
+        
+        if elements:
+            element_labels = [elem.get("label", "") for elem in elements[:10]]  # Limit to first 10 elements
+            vision_summary.append(f"Elements: {', '.join(element_labels)}")
+    
+    combined_text = "\n".join(vision_summary)
+    
+    system_prompt = """You are a data extraction specialist. Your job is to extract voyage number and arrival date from vision analysis results of shipping tracking pages.
+
+CRITICAL REQUIREMENTS:
+1. VOYAGE NUMBER: Extract the exact voyage number/vessel name as it appears
+   - Look for patterns like: "Voyage Number: X", "Voyage: X", "Vessel: X", "Vessel Name: X"
+   - Voyage numbers typically contain letters and numbers
+   - Return the EXACT value as shown, including spaces and formatting
+
+2. ARRIVAL DATE: Extract the exact arrival date or ETA as it appears at the FINAL DESTINATION
+   - Look for patterns like: "Arrival Date: X", "Arrival: X", "ETA: X", "Estimated Arrival: X"
+   - Dates can be in various formats: "2025-02-28", "28/02/2025", "Feb 28, 2025", etc.
+   - Return the EXACT value as shown (don't normalize the format)
+
+3. If you cannot find a value, return empty string "" for that field
+4. Be precise - only extract values that are clearly visible in the vision analysis
+
+Return ONLY valid JSON with this exact structure:
+{
+    "voyage_number": "exact value or empty string",
+    "arrival_date": "exact value or empty string"
+}"""
+
+    prompt = f"""Analyze the following vision analysis results from a shipping tracking page and extract the voyage number and arrival date.
+
+Vision Analysis Results:
+{combined_text}
+
+Extract:
+1. Voyage number/vessel name (if visible)
+2. Arrival date or ETA (if visible)
+
+Return JSON with voyage_number and arrival_date fields."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Extract JSON
+        start = result.find("{")
+        end = result.rfind("}") + 1
+        if start != -1 and end > start:
+            result = result[start:end]
+        
+        extracted = json.loads(result)
+        
+        # Ensure we have the required fields
+        return {
+            "voyage_number": extracted.get("voyage_number", "").strip(),
+            "arrival_date": extracted.get("arrival_date", "").strip()
+        }
+    except Exception as e:
+        print(f"⚠️  Error extracting data from vision results: {e}")
+        return {"voyage_number": "", "arrival_date": ""}
+
+
 def detect_repeated_failures(history, threshold=2):
     if len(history) < 2:
         return None
@@ -1790,10 +2275,59 @@ def detect_repeated_failures(history, threshold=2):
 
 
 def determine_step_success(client, milestone_goal, language_result, context, current_url, post_execution_vision_results):
+    # Special handling for booking ID entry milestone - must verify ID was actually entered
+    if "Found text input for B/L or Booking ID and entered the ID" in milestone_goal:
+        booking_id = (context.booking_id or '').upper() if hasattr(context, 'booking_id') else ''
+        
+        # If code was executed, check for evidence of successful entry
+        if language_result.get("needs_code"):
+            # Check vision results for evidence that booking ID was entered and search worked
+            if post_execution_vision_results and len(post_execution_vision_results) > 0:
+                vision_data = post_execution_vision_results[0]
+                vision_notes = vision_data.get('notes', '').lower()
+                vision_elements = vision_data.get('elements', [])
+                
+                has_booking_id_in_notes = booking_id.lower() in vision_notes if booking_id else False
+                has_booking_id_in_elements = any(
+                    booking_id.lower() in str(elem.get('label', '')).lower() 
+                    for elem in vision_elements
+                ) if booking_id else False
+                has_tracking_results = any(
+                    keyword in vision_notes 
+                    for keyword in ['tracking result', 'track & trace', 'b/l no.', 'booking no.', 'route', 'voyage', 'arrival']
+                )
+                url_is_tracking_page = any(
+                    keyword in current_url.lower() 
+                    for keyword in ['track', 'trace', 'result']
+                )
+                
+                if has_booking_id_in_notes or has_booking_id_in_elements or has_tracking_results or url_is_tracking_page:
+                    return True, f"Booking ID entry successful: {'ID found in page' if (has_booking_id_in_notes or has_booking_id_in_elements) else ''} {'Tracking results displayed' if has_tracking_results else ''} {'URL indicates tracking page' if url_is_tracking_page else ''}"
+        
+        if not language_result.get("needs_code"):
+            if post_execution_vision_results and len(post_execution_vision_results) > 0:
+                vision_data = post_execution_vision_results[0]
+                vision_notes = vision_data.get('notes', '').lower()
+                vision_elements = vision_data.get('elements', [])
+                
+                has_booking_id_indicators = (
+                    any(indicator in vision_notes for indicator in [
+                        'booking id', 'booking number', 'entered', 'typed', 'filled',
+                        booking_id.lower() if booking_id else ''
+                    ]) or
+                    any(booking_id.lower() in str(elem.get('label', '')).lower() for elem in vision_elements) if booking_id else False or
+                    any(keyword in vision_notes for keyword in ['tracking result', 'track & trace', 'b/l no.'])
+                )
+                if not has_booking_id_indicators:
+                    return False, "Booking ID entry milestone marked complete without code execution - no evidence of ID being entered in page state"
+            else:
+                return False, "Booking ID entry milestone marked complete without code execution - no verification data available"
+    
     if not language_result.get("needs_code"):
+        if any(action in milestone_goal.lower() for action in ["enter", "type", "submit", "click", "navigate"]):
+            return False, f"Milestone '{milestone_goal}' requires code execution but needs_code was false"
         return True, "No code execution needed"
     
-    # Prepare context for LLM decision
     decision_context = {
         "milestone_goal": milestone_goal,
         "current_url": current_url,
@@ -1818,6 +2352,17 @@ def determine_step_success(client, milestone_goal, language_result, context, cur
     - If milestone says "Reached [site name]" → Check: Does URL contain that site's domain? Does vision confirm we're on that site?
     - If milestone says "Clicked [something] and reached [site]" → Check: Are we actually ON the target site now? (not just seeing it as a link)
     - If milestone says "Found [element]" → Check: Did vision see that element on the page?
+    - **If milestone says "Found text input for B/L or Booking ID and entered the ID" → Check STRINGENTLY:**
+      a) Was code actually executed to enter the booking ID? (Check execution_success)
+      b) Does vision show evidence that the booking ID was entered? Check MULTIPLE indicators:
+         * Look for the booking ID value in input fields (if still visible)
+         * Look for the booking ID value displayed elsewhere (in tabs, results pages, B/L number displays)
+         * Look for tracking results being displayed (if results appear, that proves ID was entered and search worked)
+         * Look for URL change to a tracking/results page (navigation to results page indicates successful submission)
+         * Look for elements like "B/L No.", "Booking No.", "Track & Trace" with the booking ID value
+      c) If no code was executed → FAILURE
+      d) If code was executed AND (booking ID appears anywhere on page OR tracking results are displayed OR URL changed to results page) → SUCCESS
+      e) The booking ID doesn't need to be in an input field - it might be displayed in results, tabs, or other UI elements after successful submission
     - If milestone says "Submitted [form]" → Check: Did the action complete and we see confirmation/results?
     - If milestone says "Results displayed" → Check VERY STRINGENTLY: 
     a) Does vision see actual tracking data (voyage number, vessel name, arrival date, ETA, container status)?
@@ -1911,15 +2456,37 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
         print("✅ Connected to existing browser session")
         
         contexts = browser.contexts
+        page = None
+        
+        # Try to use existing page first
         if contexts and contexts[0].pages:
             page = contexts[0].pages[0]
             print(f"📄 Using existing page: {page.url}")
         else:
-            if contexts:
-                page = contexts[0].new_page()
-            else:
-                page = browser.new_page()
-            print(f"📄 Created new page (no existing pages found)")
+            # Try to create new page with error handling
+            try:
+                if contexts:
+                    page = contexts[0].new_page()
+                else:
+                    # If no contexts exist, create a new context first
+                    new_context = browser.new_context(
+                        viewport={"width": 1280, "height": 720},
+                        ignore_https_errors=True
+                    )
+                    page = new_context.new_page()
+                print(f"📄 Created new page (no existing pages found)")
+            except Exception as page_create_error:
+                print(f"⚠️  Failed to create new page: {page_create_error}")
+                # Fallback: try to use any existing page from any context
+                if contexts:
+                    for ctx in contexts:
+                        if ctx.pages:
+                            page = ctx.pages[0]
+                            print(f"📄 Using fallback page from context: {page.url}")
+                            break
+                
+                if not page:
+                    raise Exception(f"Could not create or find a page: {page_create_error}")
 
         vision_helpers = VisionHelpers(page)
         playwright_mgr = PlaywrightManager(client, page)
@@ -2202,8 +2769,34 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     try:
                         vision_result = vision_agent(client, screenshot["path"], vision_objective)
                         logger.log_operation("vision_response", vision_result)
+                        
+                        # Store original vision result before DOM validation (for fallback)
+                        original_vision_result = vision_result.copy() if vision_result.get("input_groups") else None
+                        
+                        # DOM validation for input fields - verify coordinates actually point to input elements
+                        if vision_result.get("input_groups") and page:
+                            try:
+                                vision_result = validate_input_fields_against_dom(page, vision_result)
+                                # If DOM validation filtered out all inputs but original had them, preserve original data as fallback
+                                if len(vision_result.get("input_groups", [])) == 0 and original_vision_result and len(original_vision_result.get("input_groups", [])) > 0:
+                                    # Keep original input_groups but mark as unvalidated for language agent to decide
+                                    vision_result["_original_input_groups"] = original_vision_result.get("input_groups")
+                                    vision_result["_dom_validation_filtered_all"] = True
+                                    print(f"⚠️  DOM validation filtered out all inputs, preserving original vision data as fallback")
+                                logger.log_operation("vision_dom_validation", {
+                                    "validated_count": len(vision_result.get("input_groups", [])),
+                                    "original_count": len(original_vision_result.get("input_groups", [])) if original_vision_result else 0,
+                                    "validation_success": True
+                                })
+                            except Exception as dom_error:
+                                logger.log_operation("vision_dom_validation_error", {"error": str(dom_error)}, success=False)
+                                print(f"⚠️  DOM validation error: {dom_error}")
+                                # If validation fails, preserve original result
+                                if original_vision_result:
+                                    vision_result["_original_input_groups"] = original_vision_result.get("input_groups")
+                        
                         vision_results.append(vision_result)
-                        if vision_result.get("found"):
+                        if vision_result.get("found") or vision_result.get("_dom_validation_filtered_all"):
                             break
                     except Exception as e:
                         logger.log_operation("vision_error", {"error": str(e)}, success=False)
@@ -2304,21 +2897,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     except:
                         pass
             
-            # Take window screenshot to analyze tabs
-            window_screenshot_path = None
-            tab_analysis = None
-            if language_result.get("needs_code"):
-                try:
-                    window_screenshot_path = vision_helpers.take_window_screenshot(screenshot_dir / f"step_{step}_window_post.png")
-                    if window_screenshot_path:
-                        logger.log_operation("window_screenshot_post_execution", {"path": window_screenshot_path})
-                        tab_analysis = analyze_window_for_tabs(client, window_screenshot_path)
-                        logger.log_operation("tab_analysis_post_execution", tab_analysis)
-                        # Update context with tab analysis
-                        context.tab_analysis = tab_analysis
-                except Exception as e:
-                    logger.log_operation("window_screenshot_error", {"error": str(e)}, success=False)
-            
             post_execution_vision_results = []
             if post_execution_screenshots:
                 post_vision_objective = """Analyze the current page state after the action was executed:
@@ -2391,6 +2969,18 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
             data_to_extract = language_result.get("data_to_extract", [])
             if data_to_extract:
                 logger.log_operation("data_extraction_attempt", {"fields": data_to_extract})
+                
+                # For "Data extracted" milestone, extract from vision results instead of script execution
+                if "voyage_number" in data_to_extract or "arrival_date" in data_to_extract:
+                    # Extract from post-execution vision results using GPT
+                    if post_execution_vision_results and len(post_execution_vision_results) > 0:
+                        extracted_from_vision = extract_data_from_vision_results(client, post_execution_vision_results)
+                        if extracted_from_vision:
+                            context.extracted_data.update(extracted_from_vision)
+                            logger.log_operation("data_extracted_from_vision", extracted_from_vision)
+                            print(f"📊 Extracted from vision: Voyage={extracted_from_vision.get('voyage_number', '')}, Arrival={extracted_from_vision.get('arrival_date', '')}")
+                
+                # Also check script execution results (for backwards compatibility)
                 if context.last_response_data and isinstance(context.last_response_data, dict):
                     result = context.last_response_data.get("result")
                     if result:
