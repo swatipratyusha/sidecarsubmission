@@ -35,7 +35,7 @@ def test_fresh_request():
     
     try:
         response = requests.post(f"{API_URL}/track", 
-                               json={"booking_id": BOOKING_ID}, 
+                               json={"booking_id": BOOKING_ID, "force_fresh": True}, 
                                timeout=1000)  # 5 minutes for automation to complete
         
         if response.status_code != 200:

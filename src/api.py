@@ -88,6 +88,24 @@ class MilestoneCache:
         milestones = cache.get("milestones", {})
         return milestones.get(milestone)
     
+    def clear_cache(self, carrier, booking_id):
+        """Clear cache file for a specific carrier:booking_id."""
+        cache_path = self._get_cache_path(carrier, booking_id)
+        if cache_path.exists():
+            try:
+                cache_path.unlink()
+                print(f"🗑️  Cleared cache for {carrier}:{booking_id}")
+                return True
+            except Exception as e:
+                print(f"⚠️  Failed to clear cache: {e}")
+                return False
+        return False
+    
+    def cache_exists(self, carrier, booking_id):
+        """Check if cache file exists (even if expired)."""
+        cache_path = self._get_cache_path(carrier, booking_id)
+        return cache_path.exists()
+    
     def save_milestone(self, carrier, booking_id, milestone, script, operations=None):
         """Save a successful milestone script to cache."""
         cache_path = self._get_cache_path(carrier, booking_id)
@@ -2519,10 +2537,12 @@ def determine_step_success(client, milestone_goal, language_result, context, cur
         fallback_success = not any(err in (current_url or "") for err in ["chrome-error://", "about:blank"])
         return fallback_success, f"LLM evaluation failed: {e}"
 
-def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
+def real_tracking_process(booking_id, carrier="hmm", max_steps=20, force_fresh=False):
     client = OpenAI()
     log_dir = Path("logs") / booking_id
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    
+    used_cache = False
     
     if log_dir.exists():
         try:
@@ -2595,7 +2615,10 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
             cache_hit = False
             
             if next_milestone:
-                cached_milestone = milestone_cache.get_milestone_cache(carrier, booking_id, next_milestone)
+                if force_fresh:
+                    cached_milestone = None
+                else:
+                    cached_milestone = milestone_cache.get_milestone_cache(carrier, booking_id, next_milestone)
                 
                 if cached_milestone:
                     print(f"🔍 Cache hit for milestone: '{next_milestone}'")
@@ -2681,6 +2704,7 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                             if step_succeeded:
                                 # Cache validation passed - mark milestone complete and skip LLM reasoning
                                 cache_hit = True
+                                used_cache = True
                                 context.update_milestone(next_milestone)
                                 logger.log_operation("milestone_completed_from_cache", {
                                     "milestone": next_milestone,
@@ -3069,7 +3093,10 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
             context.add_to_history(pipeline_entry)
         
         print("🎉 Automation completed!")
-        return context.extracted_data
+        return {
+            "extracted_data": context.extracted_data,
+            "used_cache": used_cache
+        }
         
     except Exception as e:
         error_str = str(e)
@@ -3080,9 +3107,15 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
         except:
             pass
         try:
-            return context.extracted_data
+            return {
+                "extracted_data": context.extracted_data,
+                "used_cache": used_cache
+            }
         except:
-            return {}
+            return {
+                "extracted_data": {},
+                "used_cache": False
+            }
     finally:
         playwright.stop()
 
@@ -3103,9 +3136,14 @@ def track_booking():
         
         start_time = time.time()
         
-        extracted_data = real_tracking_process(booking_id, carrier)
+        result = real_tracking_process(booking_id, carrier, force_fresh=force_fresh)
         
         execution_time = time.time() - start_time
+        
+        extracted_data = result.get("extracted_data", {})
+        used_cache = result.get("used_cache", False)
+        
+        print(f"⏱️  Execution time: {execution_time:.2f}s, Used cache: {used_cache}")
         
         response = {
             "success": True,
@@ -3113,6 +3151,7 @@ def track_booking():
             "voyage_number": extracted_data.get("voyage_number"),
             "arrival_date": extracted_data.get("arrival_date"),
             "execution_time": round(execution_time, 2),
+            "used_cache": used_cache,
             "timestamp": datetime.now().isoformat(),
             "extracted_data": extracted_data
         }
