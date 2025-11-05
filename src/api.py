@@ -2147,6 +2147,32 @@ def extract_data_from_vision_results(client, vision_results):
         notes = vision_result.get("notes", "")
         elements = vision_result.get("elements", [])
         
+        found_in_elements = False
+        
+        if elements:
+            for elem in elements:
+                label = elem.get("label", "").lower()
+                value = elem.get("value", "").strip()
+                confidence = elem.get("confidence", 0)
+                
+                if confidence >= 0.95 and value:
+                    if "voyage" in label and not voyage_number:
+                        voyage_number = value
+                        found_in_elements = True
+                        print(f"✅ Found voyage number from elements: {voyage_number}")
+                    
+                    if ("arrival" in label or "final destination" in label) and "date" in label and not arrival_date:
+                        arrival_date = normalize_date_format(value)
+                        found_in_elements = True
+                        print(f"✅ Found arrival date from elements: {arrival_date}")
+        
+        if found_in_elements and voyage_number and arrival_date:
+            print(f"✅ Found both fields in screenshot fold {idx + 1} directly from elements")
+            break
+        
+        if voyage_number and arrival_date:
+            continue
+        
         system_prompt = """You are a data extraction specialist analyzing shipping tracking page screenshots. Extract voyage number and arrival date with HIGH CONFIDENCE only.
 
 CRITICAL REQUIREMENTS:
@@ -2159,8 +2185,9 @@ CRITICAL REQUIREMENTS:
 2. ARRIVAL DATE AT FINAL DESTINATION:
    - Extract the arrival date at the FINAL DESTINATION port only - NOT intermediate ports
    - Look for the last/latest arrival date in the route, or explicitly marked as "Final Destination"
-   - Date format MUST be converted to yyyy-mm-dd format (e.g., "2025-02-28")
-   - If date appears in other formats (e.g., "28/02/2025", "Feb 28, 2025"), convert to yyyy-mm-dd
+   - Date format MUST be converted to yyyy-mm-dd format
+   - If date appears in other formats, extract ONLY the date part in yyyy-mm-dd format
+   - If the date includes time information, extract only the date portion in yyyy-mm-dd format
    - Return empty string if you cannot identify the final destination arrival date with high confidence
 
 3. CONFIDENCE REQUIREMENT:
@@ -2198,7 +2225,7 @@ Analyze this screenshot carefully:
 1. Look for the COMPLETE voyage number/voyage ID (ensure no part is cut off)
 2. Look for the arrival date at the FINAL DESTINATION port (not intermediate ports)
 3. Only extract if you have HIGH confidence - values must be clearly visible and complete
-4. Convert arrival date to yyyy-mm-dd format if found
+4. Convert arrival date to yyyy-mm-dd format if found - if the date includes time information, extract only the date portion in yyyy-mm-dd format
 
 Return JSON with voyage_number, arrival_date, and confidence."""
 
@@ -2250,17 +2277,30 @@ def normalize_date_format(date_str):
     """
     Normalize date string to yyyy-mm-dd format.
     Handles various input formats and converts to yyyy-mm-dd.
+    Extracts date part from datetime strings if time information is included and return date in yyyy-mm-dd format.
     """
     if not date_str:
         return ""
     
     date_str = date_str.strip()
     
+    if " " in date_str and len(date_str) > 10:
+        date_part = date_str.split()[0]
+        if len(date_part) == 10 and date_part.count("-") == 2:
+            try:
+                from datetime import datetime
+                datetime.strptime(date_part, "%Y-%m-%d")
+                return date_part
+            except ValueError:
+                pass
+    
     try:
         from datetime import datetime
         
         formats_to_try = [
             "%Y-%m-%d",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
             "%d/%m/%Y",
             "%m/%d/%Y",
             "%d-%m-%Y",
@@ -2269,7 +2309,6 @@ def normalize_date_format(date_str):
             "%b %d, %Y",
             "%d %B %Y",
             "%d %b %Y",
-            "%Y-%m-%d %H:%M:%S",
             "%d/%m/%Y %H:%M",
         ]
         
@@ -2997,8 +3036,15 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                 logger.log_operation("data_extraction_attempt", {"fields": data_to_extract})
                 
                 if "voyage_number" in data_to_extract or "arrival_date" in data_to_extract:
-                    if post_execution_vision_results and len(post_execution_vision_results) > 0:
-                        extracted_from_vision = extract_data_from_vision_results(client, post_execution_vision_results)
+                    vision_results_for_extraction = []
+                    
+                    if vision_results and len(vision_results) > 0:
+                        vision_results_for_extraction = vision_results
+                    elif post_execution_vision_results and len(post_execution_vision_results) > 0:
+                        vision_results_for_extraction = post_execution_vision_results
+                    
+                    if vision_results_for_extraction:
+                        extracted_from_vision = extract_data_from_vision_results(client, vision_results_for_extraction)
                         if extracted_from_vision:
                             context.extracted_data.update(extracted_from_vision)
                             logger.log_operation("data_extracted_from_vision", extracted_from_vision)

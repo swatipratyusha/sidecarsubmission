@@ -10,7 +10,7 @@ import sys
 
 API_URL = "http://automation:5000"
 EXPECTED_VOYAGE = "YM MANDATE 0096W"
-EXPECTED_DATE = "2025-02-28"
+EXPECTED_DATE = "2025-03-28"
 BOOKING_ID = "SINI25432400"
 
 def wait_for_api():
