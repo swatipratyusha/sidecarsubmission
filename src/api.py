@@ -1561,11 +1561,12 @@ def reasoning_agent(client, context):
     HANDLING "Data extracted" MILESTONE:
     - When next_milestone is "Data extracted", your job is DIFFERENT:
       * DO NOT generate code to extract data using DOM selectors
-      * INSTEAD: Instruct vision agent to read voyage number and arrival date directly from the screenshots
-      * Set vision_objective: "Extract the voyage number and arrival date (or ETA) from the visible tracking results on this page. Look for text that contains voyage/vessel information and arrival/ETA dates. Return the exact values as they appear on screen."
-      * Set language_instruction: "Extract voyage number and arrival date from vision analysis results - no code execution needed, just read from screenshots"
-      * The vision agent will return the data in its response, and the system will parse it automatically
-      * This is more reliable than DOM selectors which often fail due to complex page structures
+      * INSTEAD: Instruct vision agent to carefully analyze ALL screenshot folds to find voyage number and arrival date
+      * Set vision_objective: "Carefully analyze this screenshot to locate the voyage number/voyage ID and the arrival date at the final destination port. Look for complete voyage identifiers (must not be cut off) and arrival dates. The system will analyze multiple screenshot folds sequentially - if information is not found in this screenshot, subsequent folds will be checked. Only return high confidence results - if you cannot clearly see the complete voyage number and final destination arrival date, indicate that the information is not found in this screenshot."
+      * Set language_instruction: "Extract voyage number and arrival date from vision analysis of all screenshot folds - no code execution needed, analyze screenshots carefully"
+      * Multiple screenshots will be analyzed one by one - each screenshot is passed to vision LLM individually
+      * The system will check all folds sequentially until both fields are found with high confidence
+      * For arrival date, ensure it is the date at the FINAL DESTINATION port, not intermediate ports
 
     CRITICAL REMINDER:
     Your ONLY job this step is: "{next_milestone}"
@@ -2075,10 +2076,12 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     HANDLING "Data extracted" MILESTONE:
     - When milestone is "Data extracted":
       * Set needs_code=false (no code execution - we read from screenshots)
-      * Set needs_vision=true (vision will read the data from screenshots)
-      * Set instruction: "Extract voyage number and arrival date from vision analysis results"
+      * Set needs_vision=true (vision will analyze ALL screenshot folds to read the data)
+      * Set instruction: "Extract voyage number and arrival date from vision analysis of all screenshot folds - analyze each screenshot carefully"
       * Set data_to_extract: ["voyage_number", "arrival_date"]
-      * The system will automatically extract these values from vision results after vision analysis completes
+      * The system will analyze multiple screenshots sequentially - each screenshot is passed individually to vision LLM
+      * Only high confidence results are returned - if information is not clearly visible in a screenshot, it will check subsequent folds
+      * Voyage number must be complete (not cut off), arrival date must be from final destination port, date format must be yyyy-mm-dd
 
     OUTPUT:
     {{
@@ -2130,86 +2133,158 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
 
 def extract_data_from_vision_results(client, vision_results):
     """
-    Extract voyage number and arrival date from vision analysis results using GPT.
-    This analyzes the vision notes and elements to find the exact values.
+    Extract voyage number and arrival date from vision analysis results.
+    Processes each screenshot result individually with high confidence requirements.
+    Returns only complete, accurate data with proper date formatting.
     """
     if not vision_results or len(vision_results) == 0:
         return {"voyage_number": "", "arrival_date": ""}
     
-    # Combine all vision data into a single text for analysis
-    vision_summary = []
-    for vision_result in vision_results:
+    voyage_number = ""
+    arrival_date = ""
+    
+    for idx, vision_result in enumerate(vision_results):
         notes = vision_result.get("notes", "")
         elements = vision_result.get("elements", [])
         
-        vision_summary.append(f"Notes: {notes}")
-        
-        if elements:
-            element_labels = [elem.get("label", "") for elem in elements[:10]]  # Limit to first 10 elements
-            vision_summary.append(f"Elements: {', '.join(element_labels)}")
-    
-    combined_text = "\n".join(vision_summary)
-    
-    system_prompt = """You are a data extraction specialist. Your job is to extract voyage number and arrival date from vision analysis results of shipping tracking pages.
+        system_prompt = """You are a data extraction specialist analyzing shipping tracking page screenshots. Extract voyage number and arrival date with HIGH CONFIDENCE only.
 
 CRITICAL REQUIREMENTS:
-1. VOYAGE NUMBER: Extract the exact voyage number/vessel name as it appears
-   - Look for patterns like: "Voyage Number: X", "Voyage: X", "Vessel: X", "Vessel Name: X"
-   - Voyage numbers typically contain letters and numbers
-   - Return the EXACT value as shown, including spaces and formatting
+1. VOYAGE NUMBER/VOYAGE ID:
+   - Extract the COMPLETE voyage identifier - it must NOT be cut off or truncated
+   - Look for complete voyage numbers that include all parts (letters, numbers, dashes, etc.)
+   - The voyage number must be fully visible - do not return partial or incomplete values
+   - Return empty string if you cannot see the complete voyage number with high confidence
 
-2. ARRIVAL DATE: Extract the exact arrival date or ETA as it appears at the FINAL DESTINATION
-   - Look for patterns like: "Arrival Date: X", "Arrival: X", "ETA: X", "Estimated Arrival: X"
-   - Dates can be in various formats: "2025-02-28", "28/02/2025", "Feb 28, 2025", etc.
-   - Return the EXACT value as shown (don't normalize the format)
+2. ARRIVAL DATE AT FINAL DESTINATION:
+   - Extract the arrival date at the FINAL DESTINATION port only - NOT intermediate ports
+   - Look for the last/latest arrival date in the route, or explicitly marked as "Final Destination"
+   - Date format MUST be converted to yyyy-mm-dd format (e.g., "2025-02-28")
+   - If date appears in other formats (e.g., "28/02/2025", "Feb 28, 2025"), convert to yyyy-mm-dd
+   - Return empty string if you cannot identify the final destination arrival date with high confidence
 
-3. If you cannot find a value, return empty string "" for that field
-4. Be precise - only extract values that are clearly visible in the vision analysis
+3. CONFIDENCE REQUIREMENT:
+   - Only return values if you have HIGH confidence they are correct
+   - If information is unclear, missing, or partially visible, return empty string for that field
+   - Do not guess or infer values
+
+4. FIELD COMPLETENESS:
+   - Voyage number must be complete - check that no part is cut off at screen edges
+   - Arrival date must be clearly from the final destination, not intermediate stops
 
 Return ONLY valid JSON with this exact structure:
 {
-    "voyage_number": "exact value or empty string",
-    "arrival_date": "exact value or empty string"
-}"""
+    "voyage_number": "complete voyage number or empty string",
+    "arrival_date": "yyyy-mm-dd format or empty string",
+    "confidence": "high" or "low"
+}
 
-    prompt = f"""Analyze the following vision analysis results from a shipping tracking page and extract the voyage number and arrival date.
+Only set confidence to "high" if both fields are clearly visible and complete. If confidence is "low", return empty strings."""
 
-Vision Analysis Results:
-{combined_text}
+        element_labels = []
+        if elements:
+            for elem in elements:
+                label = elem.get("label", "")
+                if label:
+                    element_labels.append(label)
+        
+        vision_data_text = f"""Screenshot Analysis (Fold {idx + 1}):
 
-Extract:
-1. Voyage number/vessel name (if visible)
-2. Arrival date or ETA (if visible)
+Notes: {notes}
 
-Return JSON with voyage_number and arrival_date fields."""
+Visible Elements: {', '.join(element_labels[:20]) if element_labels else 'No elements found'}
 
+Analyze this screenshot carefully:
+1. Look for the COMPLETE voyage number/voyage ID (ensure no part is cut off)
+2. Look for the arrival date at the FINAL DESTINATION port (not intermediate ports)
+3. Only extract if you have HIGH confidence - values must be clearly visible and complete
+4. Convert arrival date to yyyy-mm-dd format if found
+
+Return JSON with voyage_number, arrival_date, and confidence."""
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": vision_data_text}
+                ],
+                temperature=0
+            )
+            
+            result = response.choices[0].message.content.strip()
+            
+            start = result.find("{")
+            end = result.rfind("}") + 1
+            if start != -1 and end > start:
+                result = result[start:end]
+            
+            extracted = json.loads(result)
+            
+            confidence = extracted.get("confidence", "low").lower()
+            if confidence == "high":
+                extracted_voyage = extracted.get("voyage_number", "").strip()
+                extracted_date = extracted.get("arrival_date", "").strip()
+                
+                if extracted_voyage and not voyage_number:
+                    voyage_number = extracted_voyage
+                
+                if extracted_date and not arrival_date:
+                    arrival_date = normalize_date_format(extracted_date)
+                    
+                if voyage_number and arrival_date:
+                    print(f"✅ Found both fields in screenshot fold {idx + 1}")
+                    break
+            
+        except Exception as e:
+            print(f"⚠️  Error extracting from screenshot fold {idx + 1}: {e}")
+            continue
+    
+    return {
+        "voyage_number": voyage_number,
+        "arrival_date": arrival_date
+    }
+
+
+def normalize_date_format(date_str):
+    """
+    Normalize date string to yyyy-mm-dd format.
+    Handles various input formats and converts to yyyy-mm-dd.
+    """
+    if not date_str:
+        return ""
+    
+    date_str = date_str.strip()
+    
     try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
-        )
+        from datetime import datetime
         
-        result = response.choices[0].message.content.strip()
+        formats_to_try = [
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+            "%d-%m-%Y",
+            "%Y/%m/%d",
+            "%B %d, %Y",
+            "%b %d, %Y",
+            "%d %B %Y",
+            "%d %b %Y",
+            "%Y-%m-%d %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+        ]
         
-        start = result.find("{")
-        end = result.rfind("}") + 1
-        if start != -1 and end > start:
-            result = result[start:end]
+        for fmt in formats_to_try:
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
         
-        extracted = json.loads(result)
-        
-        # Ensure we have the required fields
-        return {
-            "voyage_number": extracted.get("voyage_number", "").strip(),
-            "arrival_date": extracted.get("arrival_date", "").strip()
-        }
+        print(f"⚠️  Could not parse date format: {date_str}")
+        return date_str
     except Exception as e:
-        print(f"⚠️  Error extracting data from vision results: {e}")
-        return {"voyage_number": "", "arrival_date": ""}
+        print(f"⚠️  Date normalization error: {e}")
+        return date_str
 
 
 def detect_repeated_failures(history, threshold=2):
@@ -2233,6 +2308,24 @@ def detect_repeated_failures(history, threshold=2):
 
 
 def determine_step_success(client, milestone_goal, language_result, context, current_url, post_execution_vision_results):
+    if "Data extracted" in milestone_goal:
+        voyage_number = context.extracted_data.get("voyage_number", "").strip() if hasattr(context, 'extracted_data') else ""
+        arrival_date = context.extracted_data.get("arrival_date", "").strip() if hasattr(context, 'extracted_data') else ""
+        
+        if not voyage_number or not arrival_date:
+            return False, f"Data extraction incomplete - missing {'voyage_number' if not voyage_number else 'arrival_date'}. Both fields required with high confidence."
+        
+        try:
+            from datetime import datetime
+            datetime.strptime(arrival_date, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return False, f"Invalid date format: {arrival_date}. Date must be in yyyy-mm-dd format."
+        
+        if len(voyage_number) < 3:
+            return False, f"Voyage number appears incomplete: {voyage_number}. Must be complete voyage identifier."
+        
+        return True, f"Data extraction successful - Voyage: {voyage_number}, Arrival: {arrival_date}"
+    
     if "Found booking ID input field, entered booking ID, and submitted tracking query" in milestone_goal:
         booking_id = (context.booking_id or '').upper() if hasattr(context, 'booking_id') else ''
         execution_success = context.last_response_data.get("success", False) if context.last_response_data else False
@@ -2343,7 +2436,13 @@ def determine_step_success(client, milestone_goal, language_result, context, cur
     c) A generic "dashboard" or "control panel" WITHOUT specific shipping data → FAILURE
     d) Error messages or "no data" states → FAILURE
     e) Only if VALID tracking results with shipping data are visible → SUCCESS
-    - If milestone says "Data extracted" → Check STRINGENTLY: Does vision confirm that BOTH voyage number AND arrival date (or ETA) are explicitly visible and readable? Both required fields must be present for SUCCESS.
+    - If milestone says "Data extracted" → Check STRINGENTLY:
+      a) Both voyage_number AND arrival_date must be extracted and present in context.extracted_data
+      b) Voyage number must be complete (not empty, not cut off)
+      c) Arrival date must be in yyyy-mm-dd format and from final destination port
+      d) Both fields must have been extracted with high confidence from screenshot analysis
+      e) If either field is missing or empty, the milestone is NOT complete - FAILURE
+      f) Success requires BOTH fields to be present with valid values
 
     IMPORTANT EDGE CASES:
     - Partial script success counts: If milestone is "Reached X site" and URL shows X site AND vision confirms X site, SUCCESS even if script had errors doing extra things
@@ -2720,7 +2819,8 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                                     vision_result["_original_input_groups"] = original_vision_result.get("input_groups")
                         
                         vision_results.append(vision_result)
-                        if vision_result.get("found") or vision_result.get("_dom_validation_filtered_all"):
+                        is_data_extraction_milestone = next_milestone and "Data extracted" in next_milestone
+                        if not is_data_extraction_milestone and (vision_result.get("found") or vision_result.get("_dom_validation_filtered_all")):
                             break
                     except Exception as e:
                         logger.log_operation("vision_error", {"error": str(e)}, success=False)
