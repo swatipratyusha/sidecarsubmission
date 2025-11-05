@@ -428,6 +428,226 @@ class CurrentContext:
 class VisionHelpers:
     def __init__(self, page):
         self.page = page
+        self.popup_closed_by_click = False  # Track if popups were closed by click_at_coordinates
+    
+    def close_popup(self):
+        """
+        Attempts to close any popup/modal/overlay using metadata-driven detection.
+        Identifies popups by their behavior characteristics (z-index, positioning, visibility)
+        rather than hardcoded class names or selectors.
+        """
+        print("\n🚪 Attempting to close popup/modal...")
+        
+        try:
+            self.page.wait_for_timeout(500)
+        except:
+            pass
+        
+        # Strategy 1: Try pressing Escape key
+        try:
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(500)
+            print("  ✅ Tried Escape key")
+        except Exception:
+            pass
+        
+        # Strategy 2: Use JavaScript to find popup-like elements by metadata/characteristics
+        try:
+            popup_info = self.page.evaluate("""
+                () => {
+                    const allElements = document.querySelectorAll('*');
+                    const popups = [];
+                    
+                    for (const el of allElements) {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        
+                        // Check if element has popup-like characteristics
+                        const zIndex = parseInt(style.zIndex) || 0;
+                        const position = style.position;
+                        const display = style.display;
+                        const visibility = style.visibility;
+                        const opacity = parseFloat(style.opacity);
+                        
+                        // Popup indicators:
+                        // 1. High z-index (usually > 1000 for popups)
+                        // 2. Fixed or absolute positioning
+                        // 3. Visible and displayed
+                        // 4. Has significant size (not tiny)
+                        const isPopupLike = (
+                            (zIndex > 1000 || zIndex > 100) &&
+                            (position === 'fixed' || position === 'absolute') &&
+                            display !== 'none' &&
+                            visibility !== 'hidden' &&
+                            opacity > 0.5 &&
+                            rect.width > 100 &&
+                            rect.height > 50
+                        );
+                        
+                        if (isPopupLike) {
+                            // Find buttons within this popup element
+                            const buttons = el.querySelectorAll('button');
+                            const closeButtonCandidates = [];
+                            
+                            for (const btn of buttons) {
+                                const btnRect = btn.getBoundingClientRect();
+                                const btnText = btn.textContent.trim();
+                                
+                                // Close button indicators:
+                                // 1. Usually small (not a main action button)
+                                // 2. Often positioned in top-right corner of popup
+                                // 3. May have specific text or be icon-only
+                                const isSmallButton = btnRect.width < 100 && btnRect.height < 100;
+                                const isInTopRight = (
+                                    btnRect.right > rect.right - 50 &&  // Near right edge
+                                    btnRect.top < rect.top + 100        // Near top
+                                );
+                                
+                                if (isSmallButton || isInTopRight || btnText.length < 10) {
+                                    closeButtonCandidates.push({
+                                        text: btnText,
+                                        x: btnRect.x + btnRect.width / 2,
+                                        y: btnRect.y + btnRect.height / 2,
+                                        zIndex: zIndex
+                                    });
+                                }
+                            }
+                            
+                            if (closeButtonCandidates.length > 0) {
+                                popups.push({
+                                    zIndex: zIndex,
+                                    rect: {
+                                        x: rect.x,
+                                        y: rect.y,
+                                        width: rect.width,
+                                        height: rect.height
+                                    },
+                                    closeButtons: closeButtonCandidates
+                                });
+                            }
+                        }
+                    }
+                    
+                    // Sort by z-index (highest first - most likely to be the visible popup)
+                    popups.sort((a, b) => b.zIndex - a.zIndex);
+                    
+                    return popups.length > 0 ? {
+                        found: true,
+                        popups: popups.map(p => ({
+                            zIndex: p.zIndex,
+                            rect: p.rect,
+                            closeButtons: p.closeButtons.map(btn => ({
+                                text: btn.text,
+                                x: Math.round(btn.x),
+                                y: Math.round(btn.y)
+                            }))
+                        }))
+                    } : { found: false };
+                }
+            """)
+            
+            if popup_info.get("found") and len(popup_info.get("popups", [])) > 0:
+                print(f"  🔍 Found {len(popup_info['popups'])} popup-like element(s) using metadata detection")
+                
+                # Try the highest z-index popup first (most likely the visible one)
+                for popup_idx, popup in enumerate(popup_info["popups"]):
+                    print(f"  📋 Popup {popup_idx + 1} (z-index {popup['zIndex']}) has {len(popup['closeButtons'])} close button candidate(s)")
+                    
+                    # Store the popup's z-index to check if it disappeared
+                    target_z_index = popup["zIndex"]
+                    
+                    for btn_idx, close_btn in enumerate(popup["closeButtons"]):
+                        try:
+                            x, y = close_btn["x"], close_btn["y"]
+                            btn_text = close_btn["text"]
+                            print(f"  🖱️  Attempting to click button {btn_idx + 1} at ({x}, {y}) - text: '{btn_text}'")
+                            
+                            self.page.mouse.click(x, y)
+                            # Wait longer for popup closing animation to complete (was 800ms, now 2000ms)
+                            self.page.wait_for_timeout(2000)
+                            
+                            # Check if popup with this z-index disappeared
+                            remaining_popups_info = self.page.evaluate("""
+                                () => {
+                                    const allElements = document.querySelectorAll('*');
+                                    const visiblePopups = [];
+                                    for (const el of allElements) {
+                                        const style = window.getComputedStyle(el);
+                                        const zIndex = parseInt(style.zIndex) || 0;
+                                        const rect = el.getBoundingClientRect();
+                                        if (zIndex > 1000 && 
+                                            style.display !== 'none' && 
+                                            style.visibility !== 'hidden' &&
+                                            rect.width > 100 &&
+                                            rect.height > 50) {
+                                            visiblePopups.push(zIndex);
+                                        }
+                                    }
+                                    return visiblePopups;
+                                }
+                            """)
+                            
+                            # Check if the target popup disappeared
+                            if target_z_index not in remaining_popups_info:
+                                print(f"  ✅ Successfully closed popup (z-index {target_z_index} disappeared)!")
+                                return True
+                            else:
+                                print(f"  ⚠️  Popup still visible, trying next button...")
+                                
+                        except Exception as e:
+                            print(f"  ⚠️  Error clicking button: {e}")
+                            continue
+                    
+                    # If highest z-index popup couldn't be closed, try others
+                    if popup_idx == 0:
+                        print(f"  ⚠️  Could not close highest z-index popup, trying others...")
+                        continue
+                    else:
+                        break
+        except Exception as e:
+            print(f"  ⚠️  Error in popup detection: {e}")
+        
+        # Strategy 3: Fallback - position-based detection
+        print("  🔍 Trying position-based close button detection...")
+        try:
+            viewport = self.page.viewport_size or {"width": 1280, "height": 720}
+            close_positions = [
+                (viewport["width"] - 50, 50),
+                (viewport["width"] - 100, 50),
+                (viewport["width"] - 50, 100),
+            ]
+            
+            for x, y in close_positions:
+                try:
+                    element_at_pos = self.page.evaluate(f"""
+                        () => {{
+                            const el = document.elementFromPoint({x}, {y});
+                            if (el && el.tagName === 'BUTTON') {{
+                                return {{
+                                    text: el.textContent.trim(),
+                                    x: el.getBoundingClientRect().x + el.getBoundingClientRect().width / 2,
+                                    y: el.getBoundingClientRect().y + el.getBoundingClientRect().height / 2
+                                }};
+                            }}
+                            return null;
+                        }}
+                    """)
+                    
+                    if element_at_pos:
+                        btn_x, btn_y = int(element_at_pos["x"]), int(element_at_pos["y"])
+                        print(f"  🖱️  Found button at ({x}, {y}), clicking at ({btn_x}, {btn_y})")
+                        self.page.mouse.click(btn_x, btn_y)
+                        self.page.wait_for_timeout(500)
+                        print(f"  ✅ Clicked button at position")
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        
+        print("  ⚠️  Could not find or close popup using metadata detection")
+        print("  ℹ️  Popup may have closed, or it may require manual intervention")
+        return False
     
     def take_screenshot(self, path, timeout=30000):
         try:
@@ -561,17 +781,22 @@ class VisionHelpers:
     def click_at_coordinates(self, x, y, scroll_into_view=True):
         """
         Click at viewport coordinates (x, y) using pyautogui.
-        Converts viewport coordinates to screen coordinates and performs OS-level click.
-        More reliable than Playwright's mouse.click for elements in overlays/modals.
+        Uses two-try approach:
+        1. First try: Coordinate click WITH expect_page() to catch new tabs via events
+        2. Second try: Normal coordinate click if no new tab opened (same-tab navigation)
         
         Args:
             x: X coordinate in viewport (from vision model)
             y: Y coordinate in viewport (from vision model)
             scroll_into_view: Whether to scroll the coordinates into view first
+        
+        Returns:
+            dict with {"success": bool, "new_page": Page or None, "switched": bool}
         """
         try:
             # Lazy import to avoid X11 connection issues at startup
             import pyautogui
+            
             # Scroll to bring coordinates into view if needed
             if scroll_into_view:
                 viewport = self.page.viewport_size or {"width": 1280, "height": 720}
@@ -592,16 +817,103 @@ class VisionHelpers:
             
             print(f"🖱️  Clicking at viewport ({x}, {y}) → screen ({screen_coords['screen_x']:.0f}, {screen_coords['screen_y']:.0f})")
             
-            # Use pyautogui to click at absolute screen coordinates
+            # ============================================================
+            # FIRST TRY: Coordinate click WITH expect_page() to catch new tabs
+            # ============================================================
+            try:
+                print(f"🔍 Attempting coordinate click with new tab detection...")
+                with self.page.context.expect_page(timeout=3000) as new_page_info:
+                    # Perform the coordinate click
+                    pyautogui.click(screen_coords["screen_x"], screen_coords["screen_y"])
+                
+                new_page = new_page_info.value
+                if new_page:
+                    print(f"✅ New tab opened via coordinate click! Switching to: {new_page.url}")
+                    try:
+                        new_page.wait_for_load_state('domcontentloaded', timeout=5000)
+                    except:
+                        pass
+                    
+                    # Update self.page to the new page
+                    old_url = self.page.url if not self.page.is_closed() else "unknown"
+                    self.page = new_page
+                    new_page.bring_to_front()
+                    
+                    print(f"🔄 Switched from {old_url} → {new_page.url}")
+                    
+                    # Close any popups on the new tab
+                    popup_closed = False
+                    try:
+                        popup_closed = self.close_popup()
+                        # Track that we closed popups so execute() doesn't close them again
+                        self.popup_closed_by_click = popup_closed
+                    except Exception as popup_error:
+                        print(f"⚠️  Popup closing failed: {popup_error}")
+                    
+                    return {"success": True, "new_page": new_page, "switched": True, "popup_closed": popup_closed}
+            except Exception as expect_error:
+                # TimeoutError or other exception - no new tab opened
+                # This is expected if link navigates in same tab
+                print(f"ℹ️  No new tab detected (timeout or same-tab navigation): {type(expect_error).__name__}")
+            
+            # ============================================================
+            # SECOND TRY: Normal coordinate click (same-tab navigation)
+            # ============================================================
+            print(f"🖱️  Performing normal coordinate click (same-tab navigation)...")
             pyautogui.click(screen_coords["screen_x"], screen_coords["screen_y"])
             
-            # Small delay after click
-            time.sleep(0.3)
+            # Wait for page to load (navigation might happen in same tab)
+            try:
+                self.page.wait_for_load_state('domcontentloaded', timeout=5000)
+            except:
+                pass  # Page might already be loaded or navigation failed
             
-            return True
+            return {"success": True, "new_page": None, "switched": False, "popup_closed": False}
+            
         except Exception as e:
             print(f"⚠️  Coordinate click failed: {e}")
-            return False
+            return {"success": False, "new_page": None, "switched": False, "popup_closed": False}
+    
+    def click_and_type_at_coordinates(self, x, y, text, scroll_into_view=True):
+        """
+        Click at viewport coordinates and type text directly using keyboard.
+        This is more reliable than clicking and then using page.fill() with selectors.
+        
+        Args:
+            x: X coordinate in viewport (from vision model)
+            y: Y coordinate in viewport (from vision model)
+            text: Text to type into the input field
+            scroll_into_view: Whether to scroll the coordinates into view first
+        
+        Returns:
+            dict with {"success": bool, "new_page": Page or None, "switched": bool}
+        """
+        try:
+            # First, click at coordinates (using existing method)
+            click_result = self.click_at_coordinates(x, y, scroll_into_view)
+            
+            if not click_result.get("success"):
+                return click_result
+            
+            # If a new tab opened, we need to type on the new page
+            if click_result.get("switched") and click_result.get("new_page"):
+                page_to_use = click_result["new_page"]
+            else:
+                page_to_use = self.page
+            
+            # Wait a brief moment for the input field to be ready
+            page_to_use.wait_for_timeout(300)
+            
+            # Type the text directly using keyboard (more reliable after coordinate click)
+            print(f"⌨️  Typing text at clicked coordinates: '{text}'")
+            page_to_use.keyboard.type(text, delay=50)
+            
+            print(f"✅ Successfully typed text at coordinates")
+            return click_result
+            
+        except Exception as e:
+            print(f"⚠️  Click and type at coordinates failed: {e}")
+            return {"success": False, "new_page": None, "switched": False, "popup_closed": False}
     
     def take_window_screenshot(self, path, timeout=30000):
         """Takes a screenshot of the entire browser window including chrome/tabs"""
@@ -682,11 +994,19 @@ class PlaywrightManager:
         
         - FOR COORDINATE-BASED CLICKS that might open new tabs (e-Service links, carrier links, etc.):
           vision_helpers.click_at_coordinates(x, y)
-          time.sleep(2)  # Wait for new tab to be created and registered in context
-          pages = page.context.pages
-          if len(pages) > 1:
-              page = pages[-1]  # CRITICAL: Reassign page variable to switch to new tab
-              page.bring_to_front()
+          # NOTE: click_at_coordinates() automatically handles new tab detection internally
+          # It uses expect_page() to catch new tabs via events, then falls back to normal click
+          # If a new tab opens, it will automatically switch. No manual tab checking needed.
+          # After calling click_at_coordinates(), just wait for page load:
+          page.wait_for_load_state('load')
+        
+        - FOR CLICKING AND TYPING INTO INPUT FIELDS (when coordinates are known):
+          # IMPORTANT: Use click_and_type_at_coordinates() instead of click_at_coordinates() + page.fill()
+          # This avoids timeout issues with page.fill() after coordinate clicks
+          vision_helpers.click_and_type_at_coordinates(x, y, 'text_to_enter')
+          # This method handles clicking, waiting for input to be ready, and typing directly
+          # No need to call page.fill() separately - it's all handled internally
+          # Example: vision_helpers.click_and_type_at_coordinates(689, 130, 'SINI25432400')
         
         - IMPORTANT: You MUST reassign the 'page' variable (page = pages[-1] or page = new_page) for the system to detect the tab switch
         - The 'page' variable reassignment is what triggers automatic page reference updates in the automation system
@@ -862,15 +1182,22 @@ class PlaywrightManager:
         if not self.page:
             return {"success": False, "error": "No page object available"}
         try:
-            # Count tabs BEFORE execution
+            # Capture state BEFORE execution
             tabs_before = len(self.page.context.pages)
+            try:
+                url_before = self.page.url if not self.page.is_closed() else "unknown"
+            except:
+                url_before = "unknown"
             
-            local_vars = {"page": self.page, "result": {}}
+            if vision_helpers:
+                vision_helpers.popup_closed_by_click = False
+            
+            import time
+            local_vars = {"page": self.page, "result": {}, "time": time}
             if vision_helpers:
                 local_vars["vision_helpers"] = vision_helpers
             exec(script, {}, local_vars)
             result = local_vars.get("result")
-            # Ensure result is a dict (not None or other type)
             if not isinstance(result, dict):
                 result = {}
             
@@ -878,51 +1205,138 @@ class PlaywrightManager:
             new_page = local_vars.get("page")
             script_switched = new_page and new_page != self.page
             
-            # Wait briefly for any new tabs to be registered in context
-            # (coordinate-based clicks may have a delay before tab appears in context.pages)
-            time.sleep(1.5)
+            if vision_helpers and vision_helpers.page != self.page:
+                if not script_switched:
+                    # click_at_coordinates() switched but script didn't update page variable
+                    # Note: click_at_coordinates() already logged the switch, so we just detect it here
+                    new_page = vision_helpers.page
+                    script_switched = True
+                    # We'll check this later to avoid duplicate popup closing
+                elif new_page != vision_helpers.page:
+                    # Both switched but to different pages - use vision_helpers.page (from click_at_coordinates)
+                    new_page = vision_helpers.page
+                    script_switched = True
             
-            # Count tabs AFTER execution - detect if new tabs opened
+            # Determine wait time based on script type
+            if "click_at_coordinates" in script:
+                wait_time = 2.5  # Longer wait for coordinate clicks
+            else:
+                wait_time = 1.5  # Standard wait for selector clicks
+            
+            # Wait for any new tabs to be registered in context
+            time.sleep(wait_time)
+            
             tabs_after = len(self.page.context.pages)
             auto_switched = False
+            script_tab_valid = True  # Assume script's tab is valid if it switched
             
-            if tabs_after > tabs_before and not script_switched:
-                # New tab(s) opened but script didn't explicitly switch
-                # Automatically detect and validate
+            if tabs_after > tabs_before:
                 print(f"🆕 New tab detected ({tabs_before} → {tabs_after})")
                 
                 all_pages = self.page.context.pages
                 new_tabs = all_pages[tabs_before:]  # Get newly opened tabs
                 
-                for new_tab in new_tabs:
-                    # Wait briefly for new tab to load
+                # If script switched, validate its choice first
+                if script_switched and new_page in new_tabs:
                     try:
-                        new_tab.wait_for_load_state('domcontentloaded', timeout=5000)
+                        new_page.wait_for_load_state('domcontentloaded', timeout=5000)
                     except:
                         pass
                     
-                    # Validate this new tab
                     if context and milestone:
-                        is_valid = self.validate_new_tab(new_tab, context, milestone)
+                        script_tab_valid = self.validate_new_tab(new_page, context, milestone)
+                        if not script_tab_valid:
+                            print(f"⚠️  Script switched to tab, but validation failed: {new_page.url}")
                     else:
-                        # No context to validate - be conservative and accept it
-                        print(f"⚠️  No context for validation, accepting tab")
-                        is_valid = True
-                    
-                    if is_valid:
-                        # Switch to this valid tab
-                        print(f"✅ Switching to validated new tab: {new_tab.url}")
-                        new_tab.bring_to_front()
-                        new_page = new_tab
-                        auto_switched = True
-                        break  # Use first valid tab
-                    else:
-                        # Invalid tab (ad) - close it
-                        print(f"❌ Closing invalid tab: {new_tab.url}")
+                        script_tab_valid = True  # No context, assume valid
+                
+                # If script's tab is invalid or script didn't switch, find best valid tab
+                if not script_switched or not script_tab_valid:
+                    for new_tab in new_tabs:
+                        # Skip script's tab if it's invalid
+                        if script_switched and new_tab == new_page and not script_tab_valid:
+                            continue
+                        
                         try:
-                            new_tab.close()
+                            new_tab.wait_for_load_state('domcontentloaded', timeout=5000)
                         except:
                             pass
+                        
+                        if context and milestone:
+                            is_valid = self.validate_new_tab(new_tab, context, milestone)
+                        else:
+                            print(f"⚠️  No context for validation, accepting tab")
+                            is_valid = True
+                        
+                        if is_valid:
+                            print(f"✅ Switching to validated new tab: {new_tab.url}")
+                            new_tab.bring_to_front()
+                            new_page = new_tab
+                            auto_switched = True
+                            
+                            # Close any popups on the new tab (only if not already closed by click_at_coordinates)
+                            if vision_helpers:
+                                vision_helpers.page = new_tab
+                                if not vision_helpers.popup_closed_by_click:
+                                    try:
+                                        vision_helpers.close_popup()
+                                    except Exception as popup_error:
+                                        print(f"⚠️  Popup closing failed: {popup_error}")
+                                else:
+                                    print(f"ℹ️  Popups already closed by click_at_coordinates(), skipping duplicate close")
+                            
+                            break  # Use first valid tab
+                        else:
+                            print(f"❌ Closing invalid tab: {new_tab.url}")
+                            try:
+                                new_tab.close()
+                            except:
+                                pass
+                elif script_switched and script_tab_valid:
+                    # Script's tab is valid, use it
+                    print(f"✅ Script switched to valid tab: {new_page.url}")
+                    
+                    # Close any popups on the new tab (only if not already closed by click_at_coordinates)
+                    if vision_helpers:
+                        vision_helpers.page = new_page
+                        if not vision_helpers.popup_closed_by_click:
+                            try:
+                                vision_helpers.close_popup()
+                            except Exception as popup_error:
+                                print(f"⚠️  Popup closing failed: {popup_error}")
+                        else:
+                            print(f"ℹ️  Popups already closed by click_at_coordinates(), skipping duplicate close")
+                    
+                    auto_switched = True
+            
+            # Scenario B: Script switched but no new tabs (might be same-tab navigation)
+            # Validate the script's chosen tab if it switched
+            elif script_switched:
+                if context and milestone:
+                    try:
+                        script_tab_valid = self.validate_new_tab(new_page, context, milestone)
+                        if not script_tab_valid:
+                            print(f"⚠️  Script switched to tab, but validation failed: {new_page.url}")
+                            # Script switched but tab is invalid - check current page
+                            current_url = new_page.url if not new_page.is_closed() else "unknown"
+                            print(f"⚠️  Current tab URL: {current_url}")
+                    except Exception as e:
+                        print(f"⚠️  Error validating script's tab: {e}")
+                        script_tab_valid = True  # Default to valid on error
+                else:
+                    script_tab_valid = True
+                
+                if script_tab_valid:
+                    auto_switched = True
+            
+            # Scenario C: Check for same-tab navigation (URL changed but no new tab)
+            try:
+                url_after = self.page.url if not self.page.is_closed() else "unknown"
+                if url_after != "unknown" and url_after != url_before and tabs_after == tabs_before and not script_switched:
+                    print(f"🔄 Same-tab navigation detected: {url_before} → {url_after}")
+                    # This is valid - navigation happened in same tab
+            except:
+                pass
             
             # Determine if we switched tabs (either script did or auto-detection did)
             switched_to_new_page = script_switched or auto_switched
@@ -934,6 +1348,17 @@ class PlaywrightManager:
                 "result": result,
                 "switched_to_new_page": switched_to_new_page
             }
+            
+            # Check if click_at_coordinates already closed popups (from script execution)
+            # If the script used click_at_coordinates and it switched, popups may already be closed
+            popup_already_closed_by_click = False
+            if "click_at_coordinates" in script and switched_to_new_page:
+                # click_at_coordinates() handles popup closing internally when it switches tabs
+                # We need to check if it was actually called and succeeded
+                # This is a heuristic - if click_at_coordinates was in the script and we switched, assume it handled popups
+                popup_already_closed_by_click = True
+            
+            return_dict["popup_already_closed"] = popup_already_closed_by_click
             
             # Store the new page reference in a way we can retrieve it (attach to return dict as attribute)
             # This is a workaround since we can't serialize Page objects
@@ -1570,6 +1995,18 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                                     "step": step
                                 })
                                 print(f"🔄 Switched to new tab (from cache): {old_url} → {new_url}")
+                                
+                                # Close any popups on the new tab (only if not already closed by click_at_coordinates)
+                                if not vision_helpers.popup_closed_by_click:
+                                    try:
+                                        vision_helpers.close_popup()
+                                        logger.log_operation("popup_closed_after_cache_tab_switch", {"url": new_url})
+                                    except Exception as popup_error:
+                                        logger.log_operation("popup_close_error_from_cache", {"error": str(popup_error)}, success=False)
+                                        print(f"⚠️  Popup closing failed: {popup_error}")
+                                else:
+                                    print(f"ℹ️  Popups already closed by click_at_coordinates(), skipping duplicate close")
+                                    logger.log_operation("popup_already_closed_by_click_cache", {"url": new_url})
                             except Exception as e:
                                 logger.log_operation("tab_switch_error_from_cache", {"error": str(e)}, success=False)
                                 print(f"⚠️  Error switching to new tab (from cache): {e}")
@@ -1825,6 +2262,20 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                                 "step": step
                             })
                             print(f"🔄 Switched to new tab: {old_url} → {new_url}")
+                            
+                            # Close any popups on the new tab (only if not already closed by click_at_coordinates)
+                            popup_already_closed = exec_result.get("popup_already_closed", False)
+                            if not popup_already_closed:
+                                try:
+                                    vision_helpers.page = new_page
+                                    vision_helpers.close_popup()
+                                    logger.log_operation("popup_closed_after_tab_switch", {"url": new_url})
+                                except Exception as popup_error:
+                                    logger.log_operation("popup_close_error", {"error": str(popup_error)}, success=False)
+                                    print(f"⚠️  Popup closing failed: {popup_error}")
+                            else:
+                                print(f"ℹ️  Popups already closed by click_at_coordinates(), skipping duplicate close")
+                                logger.log_operation("popup_already_closed_by_click", {"url": new_url})
                         except Exception as e:
                             logger.log_operation("tab_switch_error", {"error": str(e)}, success=False)
                             print(f"⚠️  Error switching to new tab: {e}")
