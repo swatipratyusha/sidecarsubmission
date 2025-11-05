@@ -130,28 +130,6 @@ class MilestoneCache:
         else:
             cache_data = {"cached_at": datetime.now().isoformat(), "milestones": {}}
         
-        cache_data["final_results"] = {
-            "voyage_number": voyage_number,
-            "arrival_date": arrival_date,
-            "verification_scripts": verification_scripts or [],
-            "cached_at": datetime.now().isoformat()
-        }
-        
-        try:
-            with open(cache_path, 'w') as f:
-                json.dump(cache_data, f, indent=2)
-            print(f"💾 Cached final results for {carrier}:{booking_id}")
-        except Exception as e:
-            print(f"⚠️  Failed to save final results: {e}")
-    
-    def get_final_results(self, carrier, booking_id):
-        """Get cached final results if available."""
-        cache = self.load_cache(carrier, booking_id)
-        
-        if not cache:
-            return None
-        
-        return cache.get("final_results")
 
 milestone_cache = MilestoneCache()
 
@@ -210,8 +188,7 @@ DOMAIN_KNOWLEDGE = {
             "Reached hub site",
             "Reached {carrier} website",
             "Accessed services section (if needed)",
-            "Found text input for B/L or Booking ID and entered the ID",
-            "Submitted tracking query",
+            "Found booking ID input field, entered booking ID, and submitted tracking query",
             "Results displayed",
             "Data extracted"
         ]
@@ -782,9 +759,6 @@ class VisionHelpers:
             
             print(f"🖱️  Clicking at viewport ({x}, {y}) → screen ({screen_coords['screen_x']:.0f}, {screen_coords['screen_y']:.0f})")
             
-            # ============================================================
-            # FIRST TRY: Coordinate click WITH expect_page() to catch new tabs
-            # ============================================================
             try:
                 print(f"🔍 Attempting coordinate click with new tab detection...")
                 with self.page.context.expect_page(timeout=3000) as new_page_info:
@@ -798,7 +772,6 @@ class VisionHelpers:
                     except:
                         pass
                     
-                    # Update self.page to the new page
                     old_url = self.page.url if not self.page.is_closed() else "unknown"
                     self.page = new_page
                     new_page.bring_to_front()
@@ -816,9 +789,6 @@ class VisionHelpers:
             except Exception as expect_error:
                 print(f"ℹ️  No new tab detected (timeout or same-tab navigation): {type(expect_error).__name__}")
             
-            # ============================================================
-            # SECOND TRY: Normal coordinate click (same-tab navigation)
-            # ============================================================
             print(f"🖱️  Performing normal coordinate click (same-tab navigation)...")
             pyautogui.click(screen_coords["screen_x"], screen_coords["screen_y"])
             
@@ -1474,14 +1444,12 @@ class Logger:
 # ============================================================================
 
 def reasoning_agent(client, context):
-    # Extract key variables
     carrier = context.get("carrier", "unknown")
     current_url = context.get("current_url", "unknown")
     last_milestone = context.get("last_achieved_milestone", "None")
     next_milestone = context.get("next_milestone", "Unknown")
     remaining_count = len(context.get("remaining_milestones", []))
     
-    # Build complete system prompt with variable interpolation
     system_prompt = f"""You are the COMMANDER. You analyze the automation state and decide what needs to happen next.
 
     CURRENT STATE:
@@ -1549,6 +1517,20 @@ def reasoning_agent(client, context):
     - On AGGREGATOR SITES: Use selectors first, coordinates as fallback
     - Coordinate clicking with pyautogui is MORE RELIABLE on carrier sites (avoids overlays, modals, strict mode)
     - Example instruction: "Vision found input at (x, y). Use vision_helpers.click_at_coordinates(x, y)"
+
+    HANDLING "Found booking ID input field, entered booking ID, and submitted tracking query" MILESTONE:
+    - **CRITICAL**: This is a COMBINED milestone that requires ALL THREE actions to complete:
+      1. FIND the booking ID input field (locate it using vision)
+      2. ENTER the booking ID (type the booking ID into the input field)
+      3. SUBMIT the tracking query (press Enter key OR click Search/Submit button)
+    - **What this milestone means**:
+      * Vision must locate the actual text input field (rectangular box for typing) - NOT buttons, NOT links, ONLY input fields
+      * Code must execute to click the input field, type the booking ID value, and submit (either via Enter key or button click)
+      * The submission must be completed - the page should navigate to results OR show tracking results on the same page
+      * Success indicators: URL changed to results page, OR tracking results visible on page, OR booking ID appears in results/tabs
+    - When setting vision_objective: "Locate ACTUAL TEXT INPUT FIELDS (rectangular boxes for typing) - NOT buttons, NOT links, ONLY input fields. Also identify the submission method (Enter key or Search/Submit button)."
+    - When setting language_instruction: "Click the input field at coordinates (x, y), type the booking_id, then submit using [Enter key OR button click at coordinates]. Ensure all three actions complete: find, enter, submit."
+    - This milestone is NOT complete until ALL three parts are done: finding, entering, AND submitting
 
     HANDLING MULTIPLE INPUT FIELDS (when next_milestone is about entering booking ID):
     - When setting vision_objective, be EXPLICIT: "Locate ACTUAL TEXT INPUT FIELDS (rectangular boxes for typing) - NOT buttons, NOT links, ONLY input fields"
@@ -1618,7 +1600,6 @@ def reasoning_agent(client, context):
     
     result = response.choices[0].message.content.strip()
     
-    # Extract JSON
     start = result.find("{")
     end = result.rfind("}") + 1
     if start != -1 and end > start:
@@ -1631,13 +1612,11 @@ def vision_agent(client, screenshot_path, objective):
     with open(screenshot_path, "rb") as f:
         image_data = base64.b64encode(f.read()).decode("utf-8")
     
-    # Check if objective is asking for input field analysis with submission context
     is_input_field_analysis = any(keyword in objective.lower() for keyword in [
         "input field", "text input", "booking id input", "b/l input", "container input",
         "enter booking", "enter the id", "input for booking"
     ])
     
-    # Build complete system prompt
     if is_input_field_analysis:
         system_prompt = f"""You are a vision analysis agent specialized in analyzing input fields and their submission mechanisms.
 
@@ -1755,7 +1734,6 @@ def vision_agent(client, screenshot_path, objective):
     prompt = f"""Objective: {objective}
             Analyze this screenshot and locate the elements."""
 
-    # Use more accurate vision model for input field analysis (critical for avoiding hallucinations)
     vision_model = "gpt-4o" if is_input_field_analysis else "gpt-4.1-mini"
 
     response = client.chat.completions.create(
@@ -1772,7 +1750,6 @@ def vision_agent(client, screenshot_path, objective):
     
     result = response.choices[0].message.content.strip()
     
-    # Extract JSON
     start = result.find("{")
     end = result.rfind("}") + 1
     if start != -1 and end > start:
@@ -1780,7 +1757,6 @@ def vision_agent(client, screenshot_path, objective):
     
     vision_result = json.loads(result)
     
-    # Validate input field results using DOM inspection if available
     if is_input_field_analysis and vision_result.get("input_groups"):
         vision_result = validate_input_fields_from_vision(vision_result, screenshot_path)
     
@@ -1803,24 +1779,19 @@ def adjust_vision_coordinates_for_scroll(vision_result, scroll_top):
     if not scroll_top or scroll_top == 0:
         return vision_result
     
-    # Adjust elements array
     if vision_result.get("elements"):
         for elem in vision_result["elements"]:
             if "y" in elem:
                 elem["y"] = elem["y"] + scroll_top
     
-    # Adjust input_groups
     if vision_result.get("input_groups"):
         for group in vision_result["input_groups"]:
-            # Adjust input coordinates
             if group.get("input") and "y" in group["input"]:
                 group["input"]["y"] = group["input"]["y"] + scroll_top
             
-            # Adjust button coordinates if present
             if group.get("submission") and group["submission"].get("button") and "y" in group["submission"]["button"]:
                 group["submission"]["button"]["y"] = group["submission"]["button"]["y"] + scroll_top
     
-    # Adjust _original_input_groups if present (used when DOM validation filters out results)
     if vision_result.get("_original_input_groups"):
         for group in vision_result["_original_input_groups"]:
             if group.get("input") and "y" in group["input"]:
@@ -1839,41 +1810,32 @@ def validate_input_fields_from_vision(vision_result, screenshot_path=None):
     if not vision_result.get("input_groups"):
         return vision_result
     
-    # This validation happens after vision returns results
-    # We'll validate when we have access to the page object
-    # For now, add a flag to indicate validation is needed
     validated_groups = []
     
     for group in vision_result.get("input_groups", []):
         input_info = group.get("input", {})
         label = input_info.get("label", "").lower()
         
-        # Filter out obvious non-input elements based on label keywords
         exclude_keywords = [
             "button", "login", "submit", "search button", "link", "icon", 
             "logo", "menu", "dropdown", "select", "navigation"
         ]
         
-        # If label contains exclusion keywords, it's likely not an input field
         if any(keyword in label for keyword in exclude_keywords):
             continue
         
-        # Keep inputs that explicitly mention input-related terms OR have relevance score
         include_keywords = [
             "input", "field", "text", "search", "booking", "b/l", "bl", 
             "container", "cntr", "tracking", "reference"
         ]
         
-        # Must have at least one include keyword or be in top nav area (low y-coord)
         has_include_keyword = any(keyword in label for keyword in include_keywords)
-        is_top_nav = input_info.get("y", 9999) < 100  # Top navigation area
+        is_top_nav = input_info.get("y", 9999) < 100
         
         if has_include_keyword or is_top_nav:
-            # Add validation flag - will be checked against DOM later
             group["_needs_dom_validation"] = True
             validated_groups.append(group)
     
-    # Update result with filtered groups
     original_count = len(vision_result.get("input_groups", []))
     vision_result["input_groups"] = validated_groups
     vision_result["found"] = len(validated_groups) > 0
@@ -1904,7 +1866,6 @@ def validate_input_fields_against_dom(page, vision_result):
         relevance_score = group.get("relevance_score", 0.0)
         
         try:
-            # Get current scroll position to account for viewport-relative coordinates
             scroll_info = page.evaluate("""() => ({
                 scrollX: window.pageXOffset || window.scrollX || 0,
                 scrollY: window.pageYOffset || window.scrollY || 0,
@@ -1912,9 +1873,6 @@ def validate_input_fields_against_dom(page, vision_result):
                 viewportHeight: window.innerHeight
             })""")
             
-            # Use JavaScript to check what element is at these coordinates
-            # Also check nearby coordinates in case vision was slightly off
-            # Use wider search area (±10px) for better matching
             element_info = page.evaluate(f"""
                 () => {{
                     // Check primary coordinate and nearby offsets (handles slight coordinate inaccuracies)
@@ -1966,46 +1924,36 @@ def validate_input_fields_against_dom(page, vision_result):
             """)
             
             if element_info.get("isInput"):
-                # Valid input field - add DOM confirmation
                 group["_dom_validated"] = True
                 group["_dom_info"] = element_info
-                # Adjust coordinates if offset was needed
                 if element_info.get("offsetX") or element_info.get("offsetY"):
                     input_info["x"] = x + element_info.get("offsetX", 0)
                     input_info["y"] = y + element_info.get("offsetY", 0)
                     print(f"✅ Adjusted coordinates by ({element_info.get('offsetX', 0)}, {element_info.get('offsetY', 0)}) for better input field alignment")
                 validated_groups.append(group)
             else:
-                # DOM validation failed - but check if we should use fallback
-                # FALLBACK: If vision confidence is high (>0.9) AND relevance score is high (>0.8) 
-                # AND label contains input-related keywords, keep it but mark as unvalidated
                 input_keywords = ["input", "field", "booking", "b/l", "bl", "container", "cntr", "search", "text"]
                 has_input_keyword = any(keyword in label for keyword in input_keywords)
                 
                 if confidence >= 0.9 and relevance_score >= 0.8 and has_input_keyword:
-                    # High confidence vision result - keep it but mark as needing verification
                     print(f"⚠️  DOM validation failed for ({x}, {y}) but keeping due to high vision confidence ({confidence:.2f}) and relevance ({relevance_score:.2f})")
                     group["_dom_validated"] = False
                     group["_dom_validation_failed"] = True
                     group["_fallback_used"] = True
                     validated_groups.append(group)
                 else:
-                    # Not an input field and no fallback criteria met - skip it
                     print(f"⚠️  Vision coordinate ({x}, {y}) points to {element_info.get('tagName')}, not an input field - filtering out")
                     continue
                 
         except Exception as e:
-            # If validation fails, be conservative and include it (might be valid)
             print(f"⚠️  DOM validation failed for ({x}, {y}): {e}")
             group["_dom_validated"] = False
             group["_dom_validation_error"] = str(e)
-            # Fallback: if vision confidence is high, keep it anyway
             if confidence >= 0.9:
                 group["_fallback_used"] = True
                 print(f"✅ Keeping input despite validation error due to high vision confidence ({confidence:.2f})")
             validated_groups.append(group)
     
-    # Update result
     original_count = len(vision_result.get("input_groups", []))
     vision_result["input_groups"] = validated_groups
     vision_result["found"] = len(validated_groups) > 0
@@ -2063,8 +2011,11 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     - **If milestone is "Data extracted" → YOU MUST set needs_code=false** - data extraction uses vision to read from screenshots, NO code execution needed
     - **If reasoning agent says "navigate to X" → YOU MUST set needs_code=true and generate navigation instruction**
     - **If reasoning agent says "click Y" → YOU MUST set needs_code=true and generate click instruction**
-    - **If reasoning agent says "enter booking ID" or "type booking ID" or "Found text input for B/L or Booking ID and entered the ID" → YOU MUST set needs_code=true and generate input instruction, EVEN IF vision validation failed or input_groups is empty**
-    - **If milestone is "Found text input for B/L or Booking ID and entered the ID" → YOU MUST set needs_code=true to actually enter the booking ID**
+    - **If reasoning agent says "enter booking ID" or "type booking ID" or milestone is "Found booking ID input field, entered booking ID, and submitted tracking query" → YOU MUST set needs_code=true and generate input instruction, EVEN IF vision validation failed or input_groups is empty**
+    - **If milestone is "Found booking ID input field, entered booking ID, and submitted tracking query" → YOU MUST set needs_code=true**
+      * This milestone requires ALL THREE actions: find input field, enter booking ID, AND submit query
+      * Code must execute to: click input field, type booking_id, and submit (Enter key OR button click)
+      * The instruction must ensure all three parts complete - do NOT generate code that only finds or only enters without submitting
     - DO NOT say "no code needed" when reasoning agent explicitly requests an action, especially booking ID entry
     - If vision found input_groups but DOM validation filtered them out, STILL generate code if reasoning agent says to enter booking ID (use the coordinates from vision anyway)
     - Only say "no code needed" if goal is achieved or milestone is "Data extracted" or reasoning agent explicitly asks for more analysis first
@@ -2169,7 +2120,6 @@ def language_agent(client, context, vision_info, reasoning_instruction=None):
     
     result = response.choices[0].message.content.strip()
     
-    # Extract JSON
     start = result.find("{")
     end = result.rfind("}") + 1
     if start != -1 and end > start:
@@ -2245,7 +2195,6 @@ Return JSON with voyage_number and arrival_date fields."""
         
         result = response.choices[0].message.content.strip()
         
-        # Extract JSON
         start = result.find("{")
         end = result.rfind("}") + 1
         if start != -1 and end > start:
@@ -2284,53 +2233,58 @@ def detect_repeated_failures(history, threshold=2):
 
 
 def determine_step_success(client, milestone_goal, language_result, context, current_url, post_execution_vision_results):
-    # Special handling for booking ID entry milestone - must verify ID was actually entered
-    if "Found text input for B/L or Booking ID and entered the ID" in milestone_goal:
+    if "Found booking ID input field, entered booking ID, and submitted tracking query" in milestone_goal:
         booking_id = (context.booking_id or '').upper() if hasattr(context, 'booking_id') else ''
-        
-        # If code was executed, check for evidence of successful entry
-        if language_result.get("needs_code"):
-            # Check vision results for evidence that booking ID was entered and search worked
-            if post_execution_vision_results and len(post_execution_vision_results) > 0:
-                vision_data = post_execution_vision_results[0]
-                vision_notes = vision_data.get('notes', '').lower()
-                vision_elements = vision_data.get('elements', [])
-                
-                has_booking_id_in_notes = booking_id.lower() in vision_notes if booking_id else False
-                has_booking_id_in_elements = any(
-                    booking_id.lower() in str(elem.get('label', '')).lower() 
-                    for elem in vision_elements
-                ) if booking_id else False
-                has_tracking_results = any(
-                    keyword in vision_notes 
-                    for keyword in ['tracking result', 'track & trace', 'b/l no.', 'booking no.', 'route', 'voyage', 'arrival']
-                )
-                url_is_tracking_page = any(
-                    keyword in current_url.lower() 
-                    for keyword in ['track', 'trace', 'result']
-                )
-                
-                if has_booking_id_in_notes or has_booking_id_in_elements or has_tracking_results or url_is_tracking_page:
-                    return True, f"Booking ID entry successful: {'ID found in page' if (has_booking_id_in_notes or has_booking_id_in_elements) else ''} {'Tracking results displayed' if has_tracking_results else ''} {'URL indicates tracking page' if url_is_tracking_page else ''}"
+        execution_success = context.last_response_data.get("success", False) if context.last_response_data else False
         
         if not language_result.get("needs_code"):
-            if post_execution_vision_results and len(post_execution_vision_results) > 0:
-                vision_data = post_execution_vision_results[0]
-                vision_notes = vision_data.get('notes', '').lower()
-                vision_elements = vision_data.get('elements', [])
+            return False, "Combined milestone requires code execution - needs_code was false. All three actions (find, enter, submit) require code execution."
+        
+        if not execution_success:
+            return False, "Code execution failed - combined milestone requires successful execution of all three actions (find input field, enter booking ID, submit query)"
+        
+        if post_execution_vision_results and len(post_execution_vision_results) > 0:
+            vision_data = post_execution_vision_results[0]
+            vision_notes = vision_data.get('notes', '').lower()
+            vision_elements = vision_data.get('elements', [])
+            
+            has_booking_id_in_notes = booking_id.lower() in vision_notes if booking_id else False
+            has_booking_id_in_elements = any(
+                booking_id.lower() in str(elem.get('label', '')).lower() 
+                for elem in vision_elements
+            ) if booking_id else False
+            
+            has_tracking_results = any(
+                keyword in vision_notes 
+                for keyword in ['tracking result', 'track & trace', 'b/l no.', 'booking no.', 'route', 'voyage', 'arrival', 'vessel', 'eta', 'discharge']
+            )
+            url_is_tracking_page = any(
+                keyword in current_url.lower() 
+                for keyword in ['track', 'trace', 'result', 'search', 'query']
+            )
+            url_changed = context.current_url != (context.last_response_data.get('url_before', '') if context.last_response_data else '')
+            
+            if has_booking_id_in_notes or has_booking_id_in_elements or has_tracking_results or url_is_tracking_page or url_changed:
+                evidence_parts = []
+                if has_booking_id_in_notes or has_booking_id_in_elements:
+                    evidence_parts.append("booking ID found in page")
+                if has_tracking_results:
+                    evidence_parts.append("tracking results visible")
+                if url_is_tracking_page or url_changed:
+                    evidence_parts.append("URL indicates submission")
                 
-                has_booking_id_indicators = (
-                    any(indicator in vision_notes for indicator in [
-                        'booking id', 'booking number', 'entered', 'typed', 'filled',
-                        booking_id.lower() if booking_id else ''
-                    ]) or
-                    any(booking_id.lower() in str(elem.get('label', '')).lower() for elem in vision_elements) if booking_id else False or
-                    any(keyword in vision_notes for keyword in ['tracking result', 'track & trace', 'b/l no.'])
-                )
-                if not has_booking_id_indicators:
-                    return False, "Booking ID entry milestone marked complete without code execution - no evidence of ID being entered in page state"
+                return True, f"Combined milestone SUCCESS: All three actions completed - {'; '.join(evidence_parts)}"
             else:
-                return False, "Booking ID entry milestone marked complete without code execution - no verification data available"
+                return False, "Combined milestone INCOMPLETE: Code executed but no evidence of submission. Missing indicators: booking ID in page, tracking results, or URL change to results page."
+        else:
+            if execution_success:
+                url_changed = context.current_url != (context.last_response_data.get('url_before', '') if context.last_response_data else '')
+                if url_changed or any(keyword in current_url.lower() for keyword in ['track', 'trace', 'result']):
+                    return True, "Combined milestone SUCCESS: Code executed and URL changed to results page"
+                else:
+                    return False, "Combined milestone INCOMPLETE: Code executed but no URL change or vision data to verify submission"
+            else:
+                return False, "Combined milestone FAILED: Code execution failed"
     
     if not language_result.get("needs_code"):
         if any(action in milestone_goal.lower() for action in ["enter", "type", "submit", "click", "navigate"]):
@@ -2361,17 +2315,27 @@ def determine_step_success(client, milestone_goal, language_result, context, cur
     - If milestone says "Reached [site name]" → Check: Does URL contain that site's domain? Does vision confirm we're on that site?
     - If milestone says "Clicked [something] and reached [site]" → Check: Are we actually ON the target site now? (not just seeing it as a link)
     - If milestone says "Found [element]" → Check: Did vision see that element on the page?
-    - **If milestone says "Found text input for B/L or Booking ID and entered the ID" → Check STRINGENTLY:**
-      a) Was code actually executed to enter the booking ID? (Check execution_success)
-      b) Does vision show evidence that the booking ID was entered? Check MULTIPLE indicators:
-         * Look for the booking ID value in input fields (if still visible)
-         * Look for the booking ID value displayed elsewhere (in tabs, results pages, B/L number displays)
-         * Look for tracking results being displayed (if results appear, that proves ID was entered and search worked)
-         * Look for URL change to a tracking/results page (navigation to results page indicates successful submission)
-         * Look for elements like "B/L No.", "Booking No.", "Track & Trace" with the booking ID value
-      c) If no code was executed → FAILURE
-      d) If code was executed AND (booking ID appears anywhere on page OR tracking results are displayed OR URL changed to results page) → SUCCESS
-      e) The booking ID doesn't need to be in an input field - it might be displayed in results, tabs, or other UI elements after successful submission
+    - **If milestone says "Found booking ID input field, entered booking ID, and submitted tracking query" → Check STRINGENTLY - This is a COMBINED milestone requiring ALL THREE actions:**
+      **CRITICAL**: This milestone requires ALL THREE parts to complete:
+      1. FIND: Input field was located (vision found it OR code executed successfully)
+      2. ENTER: Booking ID was typed into the input field (code executed + evidence of entry)
+      3. SUBMIT: Query was submitted (Enter key pressed OR button clicked, AND page changed OR results visible)
+      
+      **SUCCESS CRITERIA** (at least ONE must be true):
+      a) Code was executed successfully (execution_success = true)
+      b) AND one of these indicators:
+         * Booking ID appears in page (in input field, results, tabs, or B/L displays)
+         * Tracking results visible on page (voyage, vessel, arrival, ETA, route, etc.)
+         * URL changed to results/tracking page (navigation after submission)
+         * URL contains tracking-related keywords (track, trace, result, search, query)
+      
+      **FAILURE CRITERIA**:
+      - If no code was executed → FAILURE (all three actions require code)
+      - If code executed but NO evidence of submission (no results, no URL change, no booking ID in page) → FAILURE
+      - If code executed but only input field found (no entry or submission) → FAILURE
+      - If code executed but only entry happened (no submission) → FAILURE
+      
+      **SUCCESS = All three parts completed**: Finding input field, entering booking ID, AND submitting query
     - If milestone says "Submitted [form]" → Check: Did the action complete and we see confirmation/results?
     - If milestone says "Results displayed" → Check VERY STRINGENTLY: 
     a) Does vision see actual tracking data (voyage number, vessel name, arrival date, ETA, container status)?
@@ -2435,27 +2399,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
     context.set_goal(booking_id, carrier)
     print(f"📦 Tracking booking {booking_id} for carrier: {carrier}")
     
-    # ═══════════════════════════════════════════════════════════════
-    # CHECK FOR CACHED FINAL RESULTS
-    # ═══════════════════════════════════════════════════════════════
-    cached_final_results = milestone_cache.get_final_results(carrier, booking_id)
-    if cached_final_results:
-        print(f"🎯 Found cached final results for {carrier}:{booking_id}")
-        logger.log_operation("cached_final_results_found", cached_final_results)
-        
-        voyage_number = cached_final_results.get("voyage_number")
-        
-        print(f"🔄 Re-verifying arrival date using cached scripts...")
-
-        arrival_date = cached_final_results.get("arrival_date")
-        
-        print(f"✅ Using cached results: Voyage={voyage_number}, Arrival={arrival_date}")
-        return {
-            "voyage_number": voyage_number,
-            "arrival_date": arrival_date,
-            "from_cache": True
-        }
-    
     print("⏳ Waiting for browser to be ready...")
     time.sleep(10)
     
@@ -2467,17 +2410,14 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
         contexts = browser.contexts
         page = None
         
-        # Try to use existing page first
         if contexts and contexts[0].pages:
             page = contexts[0].pages[0]
             print(f"📄 Using existing page: {page.url}")
         else:
-            # Try to create new page with error handling
             try:
                 if contexts:
                     page = contexts[0].new_page()
                 else:
-                    # If no contexts exist, create a new context first
                     new_context = browser.new_context(
                         viewport={"width": 1280, "height": 720},
                         ignore_https_errors=True
@@ -2486,7 +2426,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                 print(f"📄 Created new page (no existing pages found)")
             except Exception as page_create_error:
                 print(f"⚠️  Failed to create new page: {page_create_error}")
-                # Fallback: try to use any existing page from any context
                 if contexts:
                     for ctx in contexts:
                         if ctx.pages:
@@ -2513,9 +2452,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
             
             context.clear_stale_context()
             
-            # ═══════════════════════════════════════════════════════════════
-            # CACHE CHECK - Try cached script for this milestone FIRST
-            # ═══════════════════════════════════════════════════════════════
             next_milestone = context.remaining_milestones[0] if context.remaining_milestones else None
             cached_milestone = None
             cache_hit = False
@@ -2532,14 +2468,12 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     })
                     
                     try:
-                        # Execute cached script
                         cached_script = cached_milestone.get("script")
                         logger.log_operation("cache_execution_start", {"script": cached_script})
                         print(f"⚡ Executing cached script for '{next_milestone}'")
                         
                         exec_result = playwright_mgr.execute(cached_script, vision_helpers, context, next_milestone)
                         
-                        # Handle page switching from cached script
                         new_page_ref = exec_result.pop("_new_page_ref", None) if exec_result.get("success") else None
                         
                         logger.log_operation("cache_execution_result", exec_result)
@@ -2572,7 +2506,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                                 })
                                 print(f"🔄 Switched to new tab (from cache): {old_url} → {new_url}")
                                 
-                                # Close any popups on the new tab (only if not already closed by click_at_coordinates)
                                 if not vision_helpers.popup_closed_by_click:
                                     try:
                                         vision_helpers.close_popup()
@@ -2587,7 +2520,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                                 logger.log_operation("tab_switch_error_from_cache", {"error": str(e)}, success=False)
                                 print(f"⚠️  Error switching to new tab (from cache): {e}")
                         
-                        # Update URL
                         try:
                             time.sleep(0.5)
                             current_url = page.url if not page.is_closed() else context.current_url or "unknown"
@@ -2596,13 +2528,9 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                         except Exception as e:
                             logger.log_operation("url_update_error_after_cache", {"error": str(e)}, success=False)
                         
-                        # ═══════════════════════════════════════════════════════════════
-                        # VALIDATE CACHE EXECUTION - Don't blindly trust script success!
-                        # ═══════════════════════════════════════════════════════════════
                         if exec_result.get("success"):
                             print(f"🔍 Validating cached milestone completion: '{next_milestone}'")
                             
-                            # Use determine_step_success to validate milestone was ACTUALLY achieved
                             step_succeeded, step_reasoning = determine_step_success(
                                 client=client,
                                 milestone_goal=next_milestone,
@@ -2649,9 +2577,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                         "cache_found": False
                     })
             
-            # ═══════════════════════════════════════════════════════════════
-            # LLM REASONING - If cache miss or cache execution failed
-            # ═══════════════════════════════════════════════════════════════
             if not cache_hit:
                 failure_detection = detect_repeated_failures(context.history)
                 if failure_detection:
@@ -2666,9 +2591,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                 reasoning_result = reasoning_agent(client, context_dict)
                 logger.log_operation("reasoning_response", reasoning_result)
                 
-                # ═══════════════════════════════════════════════════════════════
-                # AD PAGE RECOVERY - Check if LLM detected ad page hijacking
-                # ═══════════════════════════════════════════════════════════════
                 ad_recovery = reasoning_result.get("ad_recovery")
                 if ad_recovery and ad_recovery.get("detected"):
                     recovery_url = ad_recovery.get("recovery_url")
@@ -2682,22 +2604,18 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     })
                     
                     try:
-                        # Navigate back to legitimate tracking URL
                         page.goto(recovery_url, timeout=30000, wait_until='load')
                         time.sleep(1)
                         
                         current_url = page.url
                         context.update_url(current_url)
                         
-                        # Reset milestones to appropriate point
                         if reset_milestone:
-                            # Find where reset_milestone is in the milestone list
                             all_milestones = DOMAIN_KNOWLEDGE["shipping_tracking_workflow"]["milestones"]
                             formatted_milestones = [m.format(carrier=context.carrier.upper()) for m in all_milestones]
                             
                             try:
                                 reset_idx = formatted_milestones.index(reset_milestone)
-                                # Set remaining milestones from reset point onwards
                                 context.remaining_milestones = formatted_milestones[reset_idx:]
                                 context.last_achieved_milestone = formatted_milestones[reset_idx - 1] if reset_idx > 0 else "Starting automation"
                                 
@@ -2715,7 +2633,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                         })
                         print(f"✅ Recovered! Now at: {current_url}")
                         
-                        # End this step and continue to next iteration
                         pipeline_entry = logger.end_step(
                             milestone=f"Ad recovery to {reset_milestone}",
                             current_url=current_url,
@@ -2727,9 +2644,7 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     except Exception as recovery_error:
                         print(f"❌ Ad recovery failed: {recovery_error}")
                         logger.log_operation("ad_recovery_failed", {"error": str(recovery_error)}, success=False)
-                        # Continue with normal flow despite recovery failure
             else:
-                # Cache hit, skip to end of loop (already continued above)
                 reasoning_result = {}
             
             if reasoning_result.get("goal_achieved"):
@@ -2741,7 +2656,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                 )
                 break
             
-            # Skip rest if cache hit (continue statement would have already skipped)
             if cache_hit:
                 continue
             
@@ -2778,8 +2692,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                     try:
                         vision_result = vision_agent(client, screenshot["path"], vision_objective)
                         
-                        # CRITICAL: Adjust coordinates by scroll_top offset
-                        # Vision returns coordinates relative to screenshot image, but we need absolute page coordinates
                         scroll_top = screenshot.get("scroll_top", 0)
                         if scroll_top > 0:
                             vision_result = adjust_vision_coordinates_for_scroll(vision_result, scroll_top)
@@ -2787,16 +2699,12 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                         
                         logger.log_operation("vision_response", vision_result)
                         
-                        # Store original vision result before DOM validation (for fallback)
                         original_vision_result = vision_result.copy() if vision_result.get("input_groups") else None
                         
-                        # DOM validation for input fields - verify coordinates actually point to input elements
                         if vision_result.get("input_groups") and page:
                             try:
                                 vision_result = validate_input_fields_against_dom(page, vision_result)
-                                # If DOM validation filtered out all inputs but original had them, preserve original data as fallback
                                 if len(vision_result.get("input_groups", [])) == 0 and original_vision_result and len(original_vision_result.get("input_groups", [])) > 0:
-                                    # Keep original input_groups but mark as unvalidated for language agent to decide
                                     vision_result["_original_input_groups"] = original_vision_result.get("input_groups")
                                     vision_result["_dom_validation_filtered_all"] = True
                                     print(f"⚠️  DOM validation filtered out all inputs, preserving original vision data as fallback")
@@ -2808,7 +2716,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                             except Exception as dom_error:
                                 logger.log_operation("vision_dom_validation_error", {"error": str(dom_error)}, success=False)
                                 print(f"⚠️  DOM validation error: {dom_error}")
-                                # If validation fails, preserve original result
                                 if original_vision_result:
                                     vision_result["_original_input_groups"] = original_vision_result.get("input_groups")
                         
@@ -2849,13 +2756,12 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                         try:
                             new_page = new_page_ref
                             old_url = page.url if not page.is_closed() else "unknown"
-                            old_page = page  # Store reference to old page before switching
+                            old_page = page
                             
                             page = new_page
                             vision_helpers.page = new_page
                             playwright_mgr.set_page(new_page)
                             
-                            # Close the old aggregator tab after successful switch
                             try:
                                 if not old_page.is_closed():
                                     old_page.close()
@@ -2873,7 +2779,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                             })
                             print(f"🔄 Switched to new tab: {old_url} → {new_url}")
                             
-                            # Close any popups on the new tab (only if not already closed by click_at_coordinates)
                             popup_already_closed = exec_result.get("popup_already_closed", False)
                             if not popup_already_closed:
                                 try:
@@ -2949,7 +2854,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                 logger.log_operation("url_update_error", {"error": str(e)}, success=False)
                 pass
             
-            # Determine if milestone was actually achieved using LLM
             step_succeeded, step_reasoning = determine_step_success(
                 client=client,
                 milestone_goal=reasoning_result.get("next_milestone"),
@@ -2992,9 +2896,7 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
             if data_to_extract:
                 logger.log_operation("data_extraction_attempt", {"fields": data_to_extract})
                 
-                # For "Data extracted" milestone, extract from vision results instead of script execution
                 if "voyage_number" in data_to_extract or "arrival_date" in data_to_extract:
-                    # Extract from post-execution vision results using GPT
                     if post_execution_vision_results and len(post_execution_vision_results) > 0:
                         extracted_from_vision = extract_data_from_vision_results(client, post_execution_vision_results)
                         if extracted_from_vision:
@@ -3002,29 +2904,11 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
                             logger.log_operation("data_extracted_from_vision", extracted_from_vision)
                             print(f"📊 Extracted from vision: Voyage={extracted_from_vision.get('voyage_number', '')}, Arrival={extracted_from_vision.get('arrival_date', '')}")
                 
-                # Also check script execution results (for backwards compatibility)
                 if context.last_response_data and isinstance(context.last_response_data, dict):
                     result = context.last_response_data.get("result")
                     if result:
                         context.extracted_data.update(result)
                         
-                        # ═══════════════════════════════════════════════════════════════
-                        # CACHE SAVE - Save final results if both fields are extracted
-                        # ═══════════════════════════════════════════════════════════════
-                        if "voyage_number" in context.extracted_data and "arrival_date" in context.extracted_data:
-                            # Get the extraction scripts from recent operations for re-verification
-                            extraction_scripts = []
-                            if context.last_tried_script:
-                                extraction_scripts.append(context.last_tried_script)
-                            
-                            milestone_cache.save_final_results(
-                                carrier=carrier,
-                                booking_id=booking_id,
-                                voyage_number=context.extracted_data.get("voyage_number"),
-                                arrival_date=context.extracted_data.get("arrival_date"),
-                                verification_scripts=extraction_scripts
-                            )
-                            print(f"💾 Final results cached for {carrier}:{booking_id}")
             
             try:
                 step_url = page.url if not page.is_closed() else context.current_url or "unknown"
@@ -3034,7 +2918,7 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
             pipeline_entry = logger.end_step(
                 milestone=reasoning_result.get("next_milestone"),
                 current_url=step_url,
-                success=step_succeeded  # Use actual success status
+                success=step_succeeded
             )
             context.add_to_history(pipeline_entry)
         
@@ -3048,7 +2932,7 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20):
         try:
             logger.log_operation("automation_error", {"error": error_str, "error_type": type(e).__name__, "traceback": traceback.format_exc()}, success=False)
         except:
-            pass  # Logger might not be initialized yet
+            pass
         try:
             return context.extracted_data
         except:
