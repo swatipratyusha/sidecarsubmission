@@ -2850,10 +2850,16 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20, force_fresh=F
                         if exec_result.get("success"):
                             print(f"🔍 Validating cached milestone completion: '{next_milestone}'")
                             
+                            context.update_response(exec_result, "cache_executed")
+                            
+                            language_result_for_validation = {"needs_code": True}
+                            if "Data extracted" in next_milestone:
+                                language_result_for_validation["needs_code"] = False
+                            
                             step_succeeded, step_reasoning = determine_step_success(
                                 client=client,
                                 milestone_goal=next_milestone,
-                                language_result=exec_result,
+                                language_result=language_result_for_validation,
                                 context=context,
                                 current_url=context.current_url,
                                 post_execution_vision_results={}  # Cache execution, no vision yet
@@ -3182,10 +3188,12 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20, force_fresh=F
                 if "voyage_number" in data_to_extract or "arrival_date" in data_to_extract:
                     vision_results_for_extraction = []
                     
-                    if vision_results and len(vision_results) > 0:
-                        vision_results_for_extraction = vision_results
-                    elif post_execution_vision_results and len(post_execution_vision_results) > 0:
+                    if post_execution_vision_results and len(post_execution_vision_results) > 0:
                         vision_results_for_extraction = post_execution_vision_results
+                    elif vision_results and len(vision_results) > 0:
+                        vision_results_for_extraction = vision_results
+                    elif context.vision_analysis_after_action and len(context.vision_analysis_after_action) > 0:
+                        vision_results_for_extraction = context.vision_analysis_after_action
                     
                     if vision_results_for_extraction:
                         extracted_from_vision = extract_data_from_vision_results(client, vision_results_for_extraction)
