@@ -2267,10 +2267,10 @@ Return JSON with voyage_number, arrival_date, and confidence."""
             extracted = json.loads(result)
             
             confidence = extracted.get("confidence", "low").lower()
+            extracted_voyage = extracted.get("voyage_number", "").strip()
+            extracted_date = extracted.get("arrival_date", "").strip()
+            
             if confidence == "high":
-                extracted_voyage = extracted.get("voyage_number", "").strip()
-                extracted_date = extracted.get("arrival_date", "").strip()
-                
                 if extracted_voyage and not voyage_number:
                     voyage_number = extracted_voyage
                 
@@ -2280,6 +2280,19 @@ Return JSON with voyage_number, arrival_date, and confidence."""
                 if voyage_number and arrival_date:
                     print(f"✅ Found both fields in screenshot fold {idx + 1}")
                     break
+            elif confidence == "low" and (extracted_voyage or extracted_date):
+                if extracted_voyage and not voyage_number and len(extracted_voyage) >= 3:
+                    voyage_number = extracted_voyage
+                    print(f"⚠️  Found voyage number with low confidence (will verify): {voyage_number}")
+                
+                if extracted_date and not arrival_date:
+                    try:
+                        normalized = normalize_date_format(extracted_date)
+                        if normalized and len(normalized) == 10:
+                            arrival_date = normalized
+                            print(f"⚠️  Found arrival date with low confidence (will verify): {arrival_date}")
+                    except:
+                        pass
             
         except Exception as e:
             print(f"⚠️  Error extracting from screenshot fold {idx + 1}: {e}")
@@ -2364,7 +2377,135 @@ def detect_repeated_failures(history, threshold=2):
     return None
 
 
-def determine_step_success(client, milestone_goal, language_result, context, current_url, post_execution_vision_results):
+def validate_combined_milestone_with_vision(client, booking_id, screenshot_paths):
+    """
+    Validate the combined milestone (find input, enter ID, submit query) using vision analysis.
+    Analyzes all screenshots to check:
+    1. Does the booking ID appear anywhere in the results?
+    2. Do the screenshots show a tracking results page?
+    
+    Returns: (has_booking_id, has_tracking_results, analysis_notes)
+    """
+    if not screenshot_paths or len(screenshot_paths) == 0:
+        return False, False, "No screenshots available for validation"
+    
+    if not booking_id:
+        return False, False, "No booking ID provided for validation"
+    
+    has_booking_id_found = False
+    has_tracking_results_found = False
+    all_notes = []
+    
+    objective = f"""Analyze these screenshots and answer TWO critical questions:
+
+    1. BOOKING ID PRESENCE: Does the booking ID "{booking_id}" appear anywhere in these images? Look for it in:
+    - Results tables or lists
+    - Displayed tracking information
+    - Any visible text on the page
+    - The booking ID may appear with or without spaces, in different cases, or with formatting
+
+    2. TRACKING RESULTS PAGE: Do these images show a tracking results page with shipping/tracking information? Look for:
+    - Tracking data tables or lists
+    - Voyage information, vessel details, route information
+    - Container status, cargo details, shipment status
+    - Arrival dates, ETAs, discharge ports
+    - Any structured shipping/tracking information displayed
+
+    Return your analysis as JSON with this structure:
+    {{
+        "booking_id_found": boolean,
+        "booking_id_location": "description of where booking ID was found (or 'not found')",
+        "tracking_results_visible": boolean,
+        "tracking_results_description": "description of what tracking information is visible (or 'no results visible')",
+        "notes": "overall observations about the page state"
+    }}"""
+
+    for screenshot_info in screenshot_paths:
+        screenshot_path = screenshot_info.get("path") if isinstance(screenshot_info, dict) else screenshot_info
+        
+        if not screenshot_path or not Path(screenshot_path).exists():
+            continue
+        
+        try:
+            vision_result = vision_agent(client, screenshot_path, objective)
+            notes = vision_result.get("notes", "")
+            all_notes.append(f"Screenshot {screenshot_path}: {notes}")
+            
+            if isinstance(vision_result, dict):
+                if vision_result.get("booking_id_found") is True:
+                    has_booking_id_found = True
+                if vision_result.get("tracking_results_visible") is True:
+                    has_tracking_results_found = True
+            else:
+                result_str = str(vision_result).lower()
+                if "booking_id_found" in result_str and "true" in result_str:
+                    has_booking_id_found = True
+                if "tracking_results_visible" in result_str and "true" in result_str:
+                    has_tracking_results_found = True
+                
+        except Exception as e:
+            all_notes.append(f"Error analyzing {screenshot_path}: {str(e)}")
+    
+    combined_notes = "; ".join(all_notes) if all_notes else "No analysis available"
+    
+    return has_booking_id_found, has_tracking_results_found, combined_notes
+
+
+def determine_step_success(client, milestone_goal, language_result, context, current_url, post_execution_vision_results, post_execution_screenshots=None):
+    if "Accessed services section (if needed)" in milestone_goal:
+        execution_success = context.last_response_data.get("success", False) if context.last_response_data else False
+        url_before = context.last_response_data.get("url_before", "") if context.last_response_data else ""
+        switched_to_new_page = context.last_response_data.get("switched_to_new_page", False) if context.last_response_data else False
+        
+        services_url_keywords = ["e-service", "dashboard", "service", "track", "trace", "tracking"]
+        url_indicates_services = any(keyword in current_url.lower() for keyword in services_url_keywords)
+        url_changed = current_url != url_before if url_before else False
+        
+        if url_indicates_services:
+            return True, f"Already on services page - URL indicates services section: {current_url}"
+        
+        if post_execution_vision_results and len(post_execution_vision_results) > 0:
+            vision_data = post_execution_vision_results[0]
+            vision_notes = vision_data.get('notes', '').lower()
+            vision_elements = vision_data.get('elements', [])
+            
+            services_interface_indicators = [
+                'dashboard', 'control panel', 'input field', 'booking', 'tracking', 
+                'search', 'b/l', 'container', 'track & trace interface'
+            ]
+            has_services_interface = any(indicator in vision_notes for indicator in services_interface_indicators)
+            
+            homepage_indicators = [
+                'homepage', 'landing page', 'hero', 'tagline', 'main headline',
+                'background image', 'call-to-action', 'learn more'
+            ]
+            is_homepage = any(indicator in vision_notes for indicator in homepage_indicators)
+            
+            if has_services_interface and not is_homepage:
+                return True, "Services interface detected - dashboard or tracking interface visible"
+            
+            if is_homepage and not has_services_interface:
+                if execution_success and (url_changed or switched_to_new_page):
+                    return False, "Click executed but still on homepage - navigation to services section did not occur"
+                elif execution_success:
+                    return False, "Click executed but no navigation occurred - still on homepage with no services interface"
+                else:
+                    return False, "Code execution failed - services section not accessed"
+        
+        if execution_success:
+            if url_changed or switched_to_new_page:
+                if url_indicates_services:
+                    return True, f"Services section accessed - URL changed to services page: {current_url}"
+                else:
+                    return False, f"Navigation occurred but URL does not indicate services section: {current_url}"
+            else:
+                return False, "Click executed but no navigation occurred - URL unchanged and no page switch"
+        else:
+            if url_indicates_services:
+                return True, "Already on services page - no action needed"
+            else:
+                return False, "Code execution failed and not on services page - services section not accessed"
+    
     if "Data extracted" in milestone_goal:
         voyage_number = context.extracted_data.get("voyage_number", "").strip() if hasattr(context, 'extracted_data') else ""
         arrival_date = context.extracted_data.get("arrival_date", "").strip() if hasattr(context, 'extracted_data') else ""
@@ -2393,44 +2534,46 @@ def determine_step_success(client, milestone_goal, language_result, context, cur
         if not execution_success:
             return False, "Code execution failed - combined milestone requires successful execution of all three actions (find input field, enter booking ID, submit query)"
         
-        if post_execution_vision_results and len(post_execution_vision_results) > 0:
-            vision_data = post_execution_vision_results[0]
-            vision_notes = vision_data.get('notes', '').lower()
-            vision_elements = vision_data.get('elements', [])
-            
-            has_booking_id_in_notes = booking_id.lower() in vision_notes if booking_id else False
-            has_booking_id_in_elements = any(
-                booking_id.lower() in str(elem.get('label', '')).lower() 
-                for elem in vision_elements
-            ) if booking_id else False
-            
-            has_tracking_results = any(
-                keyword in vision_notes 
-                for keyword in ['tracking result', 'track & trace', 'b/l no.', 'booking no.', 'route', 'voyage', 'arrival', 'vessel', 'eta', 'discharge']
+        if post_execution_screenshots and len(post_execution_screenshots) > 0:
+            has_booking_id, has_tracking_results, analysis_notes = validate_combined_milestone_with_vision(
+                client, booking_id, post_execution_screenshots
             )
-            url_is_tracking_page = any(
-                keyword in current_url.lower() 
-                for keyword in ['track', 'trace', 'result', 'search', 'query']
-            )
-            url_changed = context.current_url != (context.last_response_data.get('url_before', '') if context.last_response_data else '')
             
-            if has_booking_id_in_notes or has_booking_id_in_elements or has_tracking_results or url_is_tracking_page or url_changed:
+            if has_tracking_results and has_booking_id:
                 evidence_parts = []
-                if has_booking_id_in_notes or has_booking_id_in_elements:
-                    evidence_parts.append("booking ID found in page")
+                if has_booking_id:
+                    evidence_parts.append("booking ID found in results")
                 if has_tracking_results:
                     evidence_parts.append("tracking results visible")
-                if url_is_tracking_page or url_changed:
-                    evidence_parts.append("URL indicates submission")
                 
-                return True, f"Combined milestone SUCCESS: All three actions completed - {'; '.join(evidence_parts)}"
+                url_changed = context.current_url != (context.last_response_data.get('url_before', '') if context.last_response_data else '')
+                if url_changed:
+                    evidence_parts.append("URL changed to results page")
+                
+                return True, f"Combined milestone SUCCESS: All three actions completed - {'; '.join(evidence_parts)}. Vision analysis: {analysis_notes}"
+            elif has_tracking_results and not has_booking_id:
+                return False, f"Combined milestone INCOMPLETE: Tracking results visible but booking ID '{booking_id}' not found in results. Submission may have failed or wrong booking ID was used. Vision analysis: {analysis_notes}"
+            elif has_booking_id and not has_tracking_results:
+                return False, f"Combined milestone INCOMPLETE: Booking ID found in page but no tracking results visible. Query may not have been submitted successfully. Vision analysis: {analysis_notes}"
             else:
-                return False, "Combined milestone INCOMPLETE: Code executed but no evidence of submission. Missing indicators: booking ID in page, tracking results, or URL change to results page."
+                url_changed = context.current_url != (context.last_response_data.get('url_before', '') if context.last_response_data else '')
+                url_is_tracking_page = any(keyword in current_url.lower() for keyword in ['track', 'trace', 'result', 'search', 'query'])
+                if url_changed or url_is_tracking_page:
+                    return False, f"Combined milestone INCOMPLETE: URL changed to results page but vision analysis shows no tracking results or booking ID in page. Submission may have failed. Vision analysis: {analysis_notes}"
+                else:
+                    return False, f"Combined milestone INCOMPLETE: Code executed but no evidence of submission. Missing: tracking results visible AND booking ID in results. Vision analysis: {analysis_notes}"
+        elif post_execution_vision_results and len(post_execution_vision_results) > 0:
+            url_changed = context.current_url != (context.last_response_data.get('url_before', '') if context.last_response_data else '')
+            url_is_tracking_page = any(keyword in current_url.lower() for keyword in ['track', 'trace', 'result', 'search', 'query'])
+            if url_changed or url_is_tracking_page:
+                return False, "Combined milestone INCOMPLETE: URL changed but no post-execution screenshots available for vision validation. Need screenshots to verify booking ID and tracking results."
+            else:
+                return False, "Combined milestone INCOMPLETE: Code executed but no post-execution screenshots available for vision validation. Need screenshots to verify submission."
         else:
             if execution_success:
                 url_changed = context.current_url != (context.last_response_data.get('url_before', '') if context.last_response_data else '')
                 if url_changed or any(keyword in current_url.lower() for keyword in ['track', 'trace', 'result']):
-                    return True, "Combined milestone SUCCESS: Code executed and URL changed to results page"
+                    return False, "Combined milestone INCOMPLETE: Code executed and URL changed but no screenshots available for vision validation. Need screenshots to verify booking ID and tracking results."
                 else:
                     return False, "Combined milestone INCOMPLETE: Code executed but no URL change or vision data to verify submission"
             else:
@@ -2465,6 +2608,21 @@ def determine_step_success(client, milestone_goal, language_result, context, cur
     - If milestone says "Reached [site name]" → Check: Does URL contain that site's domain? Does vision confirm we're on that site?
     - If milestone says "Clicked [something] and reached [site]" → Check: Are we actually ON the target site now? (not just seeing it as a link)
     - If milestone says "Found [element]" → Check: Did vision see that element on the page?
+    - **If milestone says "Accessed services section (if needed)" → Check STRINGENTLY:**
+      **CRITICAL**: This milestone requires ACTUAL navigation to a services/dashboard/tracking interface, NOT just being on a homepage with navigation links.
+      
+      **SUCCESS CRITERIA** (at least ONE must be true):
+      a) URL changed to a services page (URL contains keywords like "e-service", "dashboard", "service", "track", "trace", "tracking")
+      b) OR vision shows actual services interface (dashboard, control panel, input fields, tracking interface) - NOT just homepage with navigation links
+      c) OR already on services page (URL indicates services OR vision shows services interface)
+      
+      **FAILURE CRITERIA**:
+      - If click executed but URL unchanged AND still on homepage → FAILURE (navigation did not occur)
+      - If click executed but vision shows homepage content (hero, tagline, background image) without services interface → FAILURE
+      - If still seeing navigation links but no actual services/dashboard interface → FAILURE
+      - If code execution failed AND not already on services page → FAILURE
+      
+      **KEY DISTINCTION**: Homepage with navigation links ≠ Services section accessed. Must see actual services interface (dashboard, input fields, tracking tools) OR URL change to services page.
     - **If milestone says "Found booking ID input field, entered booking ID, and submitted tracking query" → Check STRINGENTLY - This is a COMBINED milestone requiring ALL THREE actions:**
       **CRITICAL**: This milestone requires ALL THREE parts to complete:
       1. FIND: Input field was located (vision found it OR code executed successfully)
@@ -3017,13 +3175,38 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20, force_fresh=F
                 logger.log_operation("url_update_error", {"error": str(e)}, success=False)
                 pass
             
+            data_to_extract = language_result.get("data_to_extract", [])
+            if data_to_extract:
+                logger.log_operation("data_extraction_attempt", {"fields": data_to_extract})
+                
+                if "voyage_number" in data_to_extract or "arrival_date" in data_to_extract:
+                    vision_results_for_extraction = []
+                    
+                    if vision_results and len(vision_results) > 0:
+                        vision_results_for_extraction = vision_results
+                    elif post_execution_vision_results and len(post_execution_vision_results) > 0:
+                        vision_results_for_extraction = post_execution_vision_results
+                    
+                    if vision_results_for_extraction:
+                        extracted_from_vision = extract_data_from_vision_results(client, vision_results_for_extraction)
+                        if extracted_from_vision:
+                            context.extracted_data.update(extracted_from_vision)
+                            logger.log_operation("data_extracted_from_vision", extracted_from_vision)
+                            print(f"📊 Extracted from vision: Voyage={extracted_from_vision.get('voyage_number', '')}, Arrival={extracted_from_vision.get('arrival_date', '')}")
+                
+                if context.last_response_data and isinstance(context.last_response_data, dict):
+                    result = context.last_response_data.get("result")
+                    if result:
+                        context.extracted_data.update(result)
+            
             step_succeeded, step_reasoning = determine_step_success(
                 client=client,
                 milestone_goal=reasoning_result.get("next_milestone"),
                 language_result=language_result,
                 context=context,
                 current_url=context.current_url,
-                post_execution_vision_results=post_execution_vision_results
+                post_execution_vision_results=post_execution_vision_results,
+                post_execution_screenshots=post_execution_screenshots
             )
             
             if step_succeeded:
@@ -3054,30 +3237,6 @@ def real_tracking_process(booking_id, carrier="hmm", max_steps=20, force_fresh=F
                     "reason": step_reasoning
                 }, success=False)
                 print(f"⚠️  Milestone not completed: {reasoning_result.get('next_milestone')} - will retry")
-            
-            data_to_extract = language_result.get("data_to_extract", [])
-            if data_to_extract:
-                logger.log_operation("data_extraction_attempt", {"fields": data_to_extract})
-                
-                if "voyage_number" in data_to_extract or "arrival_date" in data_to_extract:
-                    vision_results_for_extraction = []
-                    
-                    if vision_results and len(vision_results) > 0:
-                        vision_results_for_extraction = vision_results
-                    elif post_execution_vision_results and len(post_execution_vision_results) > 0:
-                        vision_results_for_extraction = post_execution_vision_results
-                    
-                    if vision_results_for_extraction:
-                        extracted_from_vision = extract_data_from_vision_results(client, vision_results_for_extraction)
-                        if extracted_from_vision:
-                            context.extracted_data.update(extracted_from_vision)
-                            logger.log_operation("data_extracted_from_vision", extracted_from_vision)
-                            print(f"📊 Extracted from vision: Voyage={extracted_from_vision.get('voyage_number', '')}, Arrival={extracted_from_vision.get('arrival_date', '')}")
-                
-                if context.last_response_data and isinstance(context.last_response_data, dict):
-                    result = context.last_response_data.get("result")
-                    if result:
-                        context.extracted_data.update(result)
                         
             
             try:
